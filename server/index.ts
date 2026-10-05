@@ -59,7 +59,13 @@ app.post('/api/projects', async (req, res) => {
   const project: Project = { id: randomUUID(), name, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), direction: 'rtl', pages: [], characters: [], relations: [], stages: [], memory: '', processed: 0, status: 'idle' };
   await saveProject(project); res.status(201).json(project);
 });
-app.get('/api/projects/:id', async (req, res) => { res.json(await readProject(req.params.id)); });
+app.get('/api/projects/:id', async (req, res) => {
+  const project=await readProject(req.params.id);
+  // A final snapshot may be visible on disk before the job's final save and
+  // lock release finish. Do not invite the UI to resume/edit during that gap.
+  if(jobs.has(project.id))project.status='running';
+  res.json(project);
+});
 app.get('/api/projects/:id/export', async (req, res) => {
   const p = await readProject(req.params.id);
   res.setHeader('Content-Disposition', `attachment; filename="comic-relations-${p.id}.json"`); res.json(p);

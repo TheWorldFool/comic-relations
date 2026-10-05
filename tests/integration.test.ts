@@ -143,7 +143,7 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   assert.ok(localRepairDiagnostic.attempts[0].adjustments.some((a:string)=>a.includes('空字段')));
   for(const failureMode of ['emptyAlways','syntaxAlways'] as const){
     p=await call(root+'/reset','POST');mode=failureMode;const beforeSyntaxFailure:number=calls;
-    await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,p.pages.findIndex(page=>page.override!=='skip'));
+    await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,p.pages.findIndex(page=>page.override!=='skip'),p.error||serverLog);
     assert.equal(calls-beforeSyntaxFailure,2);assert.equal(p.characters.length,0);assert.equal(p.stages.length,0);
     assert.match(p.error||'',failureMode==='emptyAlways'?/未返回正文/:/语法错误/);
     const failure=JSON.parse(await readFile(path.join(dataDir,'projects',p.id,'diagnostics',`${p.pages[p.processed].id}.json`),'utf8'));
