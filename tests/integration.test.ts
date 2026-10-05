@@ -111,7 +111,7 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   const workContext={originalWork:'测试原作',background:'仅用于身份对照',characterGuide:'阿甲又称小甲'};await call(root,'PATCH',{workContext});
   await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,3);assert.equal(p.stages.length,1);assert.equal(p.stages[0].fromPage,2);assert.equal(p.stages[0].toPage,3);
   assert.equal(p.characters[0].profile![0].value,'调查员');assert.equal(p.characters[0].statuses![0].target,'b');assert.ok(p.characters[0].avatar);assert.equal((await fetch(`http://127.0.0.1:${port}${p.characters[0].avatar}`)).status,200);
-  await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed');assert.equal(p.processed,5);assert.equal(calls,4);assert.equal(p.stages.length,2);assert.equal(p.stages[0].toPage,4);assert.equal(p.stages[1].fromPage,5);assert.equal(p.pages[2].analysis?.kind,'ad');
+  await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(calls,4);assert.equal(p.stages.length,2);assert.equal(p.stages[0].toPage,4);assert.equal(p.stages[1].fromPage,5);assert.equal(p.pages[2].analysis?.kind,'ad');
   assert.equal(p.characters.length,2);assert.equal(p.characters[0].name,'阿甲');assert.equal(p.identityRedirects!['named-a'],'a');
   const exported:Project=await call(root+'/export');assert.equal(exported.stages[1].relations[0].label,'敌对');
   const disk:Project=JSON.parse(await readFile(path.join(dataDir,'projects',p.id,'project.json'),'utf8'));assert.equal(disk.processed,5);assert.equal(disk.stages[0].characters[0].statuses![0].target,'b');assert.equal(exported.characters[0].records!.length,2);
@@ -124,7 +124,7 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   const invalid=await fetch(base+root+'/order',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[p.pages[0].id,p.pages[0].id]})});assert.equal(invalid.status,400);
   const privateConfig=await fetch(`http://127.0.0.1:${port}/media/${p.id}/../settings.json`);assert.notEqual(privateConfig.status,200);
   const config=await call('/settings');assert.equal(config.hasKey,true);assert.equal(config.apiKey,undefined);
-  mode='uncertain';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed');assert.equal(p.processed,5);assert.equal(p.pages[0].analysis?.kind,'story','用户指定正文不会再次因分类存疑暂停');
+  mode='uncertain';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(p.pages[0].analysis?.kind,'story','用户指定正文不会再次因分类存疑暂停');
   p=await call(root+'/reset','POST');p=await call(root+'/page-selection','PUT',{pages:p.pages.map((page,i)=>({id:page.id,purpose:i<2?'extra':'story'}))});
   mode='slow';await call(root+'/read','POST');
   for(let i=0;i<50;i++){p=await call(root);if(p.processed===2)break;await new Promise(r=>setTimeout(r,10));}
@@ -133,11 +133,11 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   mode='invalid';const beforeFailure=calls;await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,2);assert.equal(calls-beforeFailure,2,'格式失败只自动纠错一次');assert.match(p.error||'',/memory/);
   const diagnosticPath=path.join(dataDir,'projects',p.id,'diagnostics',`${p.pages[2].id}.json`);
   const failedDiagnostic=JSON.parse(await readFile(diagnosticPath,'utf8'));assert.equal(failedDiagnostic.resolved,false);assert.equal(failedDiagnostic.attempts.length,2);
-  mode='repair';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed');assert.equal(p.processed,5);
+  mode='repair';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);
   const diagnostic=JSON.parse(await readFile(diagnosticPath,'utf8'));assert.equal(diagnostic.resolved,true);assert.equal(diagnostic.attempts.length,2);
-  p=await call(root+'/reset','POST');mode='badJson';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed');assert.equal(p.processed,5);
+  p=await call(root+'/reset','POST');mode='badJson';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);
   p=await call(root+'/reset','POST');mode='emptyProperty';const beforeLocalRepair=calls;
-  await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed');
+  await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);
   assert.equal(calls-beforeLocalRepair,p.pages.filter(page=>page.override!=='skip').length,'明确的空字段格式修复无需再请求模型');
   const localRepairDiagnostic=JSON.parse(await readFile(diagnosticPath,'utf8'));assert.equal(localRepairDiagnostic.resolved,true);
   assert.ok(localRepairDiagnostic.attempts[0].adjustments.some((a:string)=>a.includes('空字段')));
@@ -162,13 +162,13 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   const lengthRaw=await readFile(lengthPath,'utf8'),lengthLog=JSON.parse(lengthRaw);
   assert.equal(lengthLog.resolved,false);assert.equal(lengthLog.attempts[0].finishReason,'length');assert.equal(lengthLog.attempts[0].reasoningTokens,32760);
   assert.equal(lengthLog.attempts[1].request.thinking.type,'disabled');assert.ok(!lengthRaw.includes('partial-json-secret'));
-  mode='truncated';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed');assert.equal(p.processed,5);
+  mode='truncated';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);
   assert.equal(JSON.parse(await readFile(lengthPath,'utf8')).resolved,true);
   p=await call(root+'/reset','POST');mode='truncatedRefusal';const refusalCalls=calls;
   await call(root+'/read','POST');p=await poll();assert.equal(p.status,'paused');assert.equal(p.processed,0);assert.equal(p.pages[0].analysis?.kind,'blocked');assert.equal(calls-refusalCalls,1);
   p=await call(root+'/reset','POST');p=await call(root+`/pages/${p.pages[0].id}`,'PATCH',{override:'auto'});
   const invalidated=await fetch(base+root+'/read',{method:'POST'});assert.equal(invalidated.status,400);
   p=await call(root+'/page-selection','PUT',{pages:p.pages.map(page=>({id:page.id,purpose:'story'}))});
-  mode='review';const reviewCalls=calls;await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed');assert.equal(p.processed,5);assert.equal(calls-reviewCalls,5,'用户划分优先，不重复发送分类复核');
+  mode='review';const reviewCalls=calls;await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(calls-reviewCalls,5,'用户划分优先，不重复发送分类复核');
   await call('/settings','PUT',{baseUrl:`http://localhost:${mockPort}`,model:'test-vision',apiKey:''});const changed=await call('/settings');assert.equal(changed.hasKey,false,'更换地址后不能回退到环境密钥');
 });
