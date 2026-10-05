@@ -10,6 +10,10 @@ import type { Project } from '../shared/types.js';
 
 test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像、断点恢复和重排失效', {timeout:60000}, async t => {
   let calls=0, failOnce=true;
+  let releaseSlow!:()=>void,markSlowStarted!:()=>void,markSlowFinished!:()=>void;
+  const slowGate=new Promise<void>(resolve=>{releaseSlow=resolve;});
+  const slowStarted=new Promise<void>(resolve=>{markSlowStarted=resolve;});
+  const slowFinished=new Promise<void>(resolve=>{markSlowFinished=resolve;});
   let searchMode: 'valid'|'repair'|'badRepair'='valid',searchCalls=0;
   let mode: 'normal' | 'uncertain' | 'slow' | 'repair' | 'invalid' | 'badJson' | 'emptyProperty' | 'emptyAlways' | 'syntaxAlways' | 'refused' | 'textRefused' | 'filterRefused' | 'truncated' | 'truncatedAlways' | 'truncatedRefusal' | 'review' = 'normal';
   const mock=createServer(async (req,res)=>{
@@ -68,7 +72,12 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content},finish_reason:'stop'}]}));return;
     }
     if(mode==='normal'&&n>=3){assert.equal(context.characters[0].statuses[0].target,'b');assert.equal(context.currentPhase.baselineStatuses[0].statuses[0].target,'b');}
-    if(mode==='slow'){await new Promise(r=>setTimeout(r,1000));}
+    if(mode==='slow'){
+      markSlowStarted();await slowGate;
+      const output={kind:'story',confidence:.95,reason:'正文',summary:'延迟请求',storyTime:'',memory:'延迟请求',turningPoint:null,characters:[],relationChanges:[]};
+      if(!res.destroyed){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));}
+      markSlowFinished();return;
+    }
     if(n===4&&failOnce){failOnce=false;res.writeHead(503);res.end('{}');return;}
     const people=[{id:'a',name:'小甲',aliases:[],description:'短发',profileUpdates:[{action:'upsert',key:'occupation',label:'职业',value:'调查员',certainty:'confirmed',evidence:'自我介绍'}],statusChanges:[{action:'upsert',key:'trust',label:'信任',value:'信任对方',certainty:'confirmed',evidence:'将任务交给对方',target:'b'}],avatarBox:{x:.1,y:.1,width:.3,height:.3}},{id:'b',name:'小乙',aliases:[],description:'长发',avatarBox:null}];
     const reading={kind:mode==='uncertain'?'uncertain':n===1?'cover':n===3?'ad':'story',confidence:mode==='uncertain'?.4:.96,reason:'测试分类',summary:'测试剧情',storyTime:'',memory:'已知人物相遇',turningPoint:mode==='normal'&&n===5?{title:'同盟破裂',reason:'正式结束合作并转为对立',confidence:.95}:null,characters:mode==='normal'&&n===2?people:mode==='normal'&&n===4?[{...people[0],id:'named-a',name:'阿甲',nameType:'named',sameAs:{id:'a',confidence:.96,evidence:'相同脸部与场景延续'}}]:[],relationChanges:mode==='normal'&&(n===2||n===5)?[{action:'upsert',source:'a',target:'b',kind:'affiliation',label:n===5?'敌对':'同伴',directed:false,evidence:'漫画对白确认'}]:[]};
@@ -79,7 +88,7 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   const dataDir=await mkdtemp(path.join(os.tmpdir(),'comic-test-'));
   const portProbe=createServer();await new Promise<void>(resolve=>portProbe.listen(0,'127.0.0.1',resolve));const port=(portProbe.address() as {port:number}).port;await new Promise<void>(resolve=>portProbe.close(()=>resolve()));
   const server=spawn(process.execPath,['--import','tsx','server/index.ts'],{env:{...process.env,DATA_DIR:dataDir,PORT:String(port),DEEPSEEK_API_KEY:'test-only-key',DEEPSEEK_BASE_URL:`http://127.0.0.1:${mockPort}`,DEEPSEEK_MODEL:'deepseek-flash',DEEPSEEK_REASONING_EFFORT:'low',DEEPSEEK_MAX_TOKENS:'32768'},stdio:'pipe'});
-  t.after(()=>{server.kill();mock.close();});
+  t.after(()=>{releaseSlow();server.kill();mock.close();});
   let serverLog='';server.stderr.on('data',b=>{serverLog+=b;});
   const base=`http://127.0.0.1:${port}/api`;
   for(let i=0;i<100;i++){try{if((await fetch(`${base}/settings`)).ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
@@ -127,9 +136,11 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   mode='uncertain';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(p.pages[0].analysis?.kind,'story','用户指定正文不会再次因分类存疑暂停');
   p=await call(root+'/reset','POST');p=await call(root+'/page-selection','PUT',{pages:p.pages.map((page,i)=>({id:page.id,purpose:i<2?'extra':'story'}))});
   mode='slow';await call(root+'/read','POST');
-  for(let i=0;i<50;i++){p=await call(root);if(p.processed===2)break;await new Promise(r=>setTimeout(r,10));}
+  await Promise.race([slowStarted,new Promise<never>((_,reject)=>{setTimeout(()=>reject(new Error(`mock reading did not start: ${serverLog}`)),15000).unref();})]);
+  p=await call(root);assert.equal(p.processed,2,p.error||serverLog);
   const concurrent=await fetch(base+root+'/order',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:p.pages.map(pg=>pg.id)})});assert.equal(concurrent.status,400);
   await call(root+'/pause','POST');p=await poll();assert.equal(p.status,'paused');assert.equal(p.processed,2);
+  releaseSlow();await slowFinished;
   mode='invalid';const beforeFailure=calls;await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,2);assert.equal(calls-beforeFailure,2,'格式失败只自动纠错一次');assert.match(p.error||'',/memory/);
   const diagnosticPath=path.join(dataDir,'projects',p.id,'diagnostics',`${p.pages[2].id}.json`);
   const failedDiagnostic=JSON.parse(await readFile(diagnosticPath,'utf8'));assert.equal(failedDiagnostic.resolved,false);assert.equal(failedDiagnostic.attempts.length,2);
