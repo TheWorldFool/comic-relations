@@ -1,0 +1,16 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+Thumbs.db
+coverage/
+.idea/
+.vscode/
+*.log
+test-results/
+playwright-report/
