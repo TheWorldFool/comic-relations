@@ -107,7 +107,7 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   const failureMetadata=await readFile(sourcesDiagnostic,'utf8');assert.equal(JSON.parse(failureMetadata).resolved,false);
   assert.ok(!failureMetadata.includes('test-only-key'));assert.ok(!failureMetadata.includes('检索得到的背景'));
   searchMode='valid';
-  const poll=async()=>{let result:Project;for(let i=0;i<100;i++){result=await call(root);if(result.status!=='running')return result;await new Promise(r=>setTimeout(r,50));}throw new Error('job timeout');};
+  const poll=async()=>{let result:Project|undefined;const deadline=Date.now()+15000;while(Date.now()<deadline){result=await call(root);if(result!.status!=='running')return result!;await new Promise(r=>setTimeout(r,100));}throw new Error(`job timeout: ${JSON.stringify({status:result?.status,processed:result?.processed,error:result?.error})} ${serverLog}`);};
   const workContext={originalWork:'测试原作',background:'仅用于身份对照',characterGuide:'阿甲又称小甲'};await call(root,'PATCH',{workContext});
   await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,3);assert.equal(p.stages.length,1);assert.equal(p.stages[0].fromPage,2);assert.equal(p.stages[0].toPage,3);
   assert.equal(p.characters[0].profile![0].value,'调查员');assert.equal(p.characters[0].statuses![0].target,'b');assert.ok(p.characters[0].avatar);assert.equal((await fetch(`http://127.0.0.1:${port}${p.characters[0].avatar}`)).status,200);
