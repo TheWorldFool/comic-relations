@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { applyReading, type Reading } from '../server/analysis.js';
 import { mergeCharacters, resolveIdentities } from '../server/identity.js';
-import { needsPageReview, reviewAcceptable } from '../server/page-review.js';
 import type { Project } from '../shared/types.js';
 
 const person=(id:string,name=id)=>({id,name,aliases:[],description:'人物',appearance:'左眼下有痣',avatarBox:null});
@@ -43,12 +42,4 @@ test('同页不同临时 ID 指向同一人时合为一份增量，已确认映�
   const p=project();applyReading(p,reading({characters:[person('a')]}));
   const result=resolveIdentities(p,reading({characters:[person('a'),{...person('new','真名'),nameType:'named',sameAs:{id:'a',confidence:.95,evidence:'对应同一张脸'}},person('constructor')]}));
   assert.equal(result.reading.characters.length,2);assert.equal(result.reading.characters[0].name,'真名');assert.equal(result.reading.characters[1].id,'constructor');
-});
-test('存疑页面先复核，两次一致的正文可继续，分歧或模糊非正文仍待人工确认',()=>{
-  const story=reading({confidence:.65}),uncertain=reading({kind:'uncertain',confidence:.4});
-  assert.equal(needsPageReview(story),true);assert.equal(reviewAcceptable(story,story),true);
-  assert.equal(reviewAcceptable(uncertain,reading()),true);assert.equal(reviewAcceptable(uncertain,uncertain),false);
-  assert.equal(reviewAcceptable(story,reading({kind:'cover',confidence:.65})),false);
-  assert.equal(needsPageReview(reading({kind:'ad',confidence:.85})),true);
-  assert.equal(reviewAcceptable(reading({kind:'ad',confidence:.85}),reading({kind:'ad',confidence:.85})),true);
 });

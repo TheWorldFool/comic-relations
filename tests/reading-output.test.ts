@@ -35,3 +35,11 @@ test('缺失关键剧情、人物或关系必须纠错，不能用空值静默�
   }
   for(const confidence of [null,'',true,'90%',90]){const result=parseReadingOutput({...validOutput(),confidence});assert.equal(result.parsed.success,false);}
 });
+test('会进入后续每页上下文的自由文本有宽松上限，只有异常长度才被拒绝',()=>{
+  const ok:any=validOutput();ok.memory='字'.repeat(8000);assert.equal(parseReadingOutput(ok).parsed.success,true);
+  const tooLong:any=validOutput();tooLong.memory='字'.repeat(8001);const result=parseReadingOutput(tooLong);
+  assert.equal(result.parsed.success,false);
+  if(!result.parsed.success)assert.match(describeReadingIssues(result.parsed.error.issues),/memory/);
+  const longFact:any=validOutput();longFact.characters[0].profileUpdates=[{action:'upsert',key:'job',label:'职业',value:'调查员',certainty:'confirmed',evidence:'字'.repeat(2001)}];
+  assert.equal(parseReadingOutput(longFact).parsed.success,false);
+});

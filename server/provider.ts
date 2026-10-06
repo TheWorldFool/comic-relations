@@ -6,9 +6,14 @@ import { dataDir, projectDir } from './store.js';
 import { readingSchema, systemPrompt, type Reading } from './analysis.js';
 import { parseReadingOutput, describeReadingIssues, ReadingOutputError, isModelRefusal, ModelRefusalError } from './reading-output.js';
 import type { Project, Settings } from '../shared/types.js';
-import { readingOptions, readingContext } from './reading-request.js';
+import { readingOptions, readingContext, referenceCharacters } from './reading-request.js';
+import { ReadingImages } from './reading-images.js';
+import { memoryIssue } from './reading-memory.js';
 import { ModelJsonError, parseModelJson } from './model-json.js';
 const configPath = path.join(dataDir, 'settings.json');
+const modelReadingSchema = readingSchema.extend({memoryMode:readingSchema.shape.memoryMode.unwrap(),threadChanges:readingSchema.shape.threadChanges.unwrap()});
+const modelReadingSchemaText = JSON.stringify(z.toJSONSchema(modelReadingSchema));
+
 type Config = { baseUrl: string; model: string; apiKey?: string };
 export async function config(): Promise<Config> {
   const saved = JSON.parse(await readFile(configPath, 'utf8').catch(() => '{}'));
@@ -29,7 +34,11 @@ class ModelTruncationError extends Error {
     this.name='ModelTruncationError';
   }
 }
-export async function completion(messages: unknown[], signal: AbortSignal, recoverTruncation=false, onAdjustment?:(adjustments:string[])=>void) {
+const numeric=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)?value:undefined;
+export type TokenUsage = { promptTokens?:number; completionTokens?:number; reasoningTokens?:number };
+// Accumulated over the attempts of one page read; elapsed time is measured by the caller.
+export type PageMetrics = { attempts:number; promptTokens:number; completionTokens:number; reasoningTokens:number; preparationMs?:number; modelMs?:number; contextCharacters?:number; imageCount?:number };
+export async function completion(messages: unknown[], signal: AbortSignal, recoverTruncation=false, onAdjustment?:(adjustments:string[])=>void, onUsage?:(usage:TokenUsage)=>void) {
   const c = await config();
   if (!c.apiKey) throw new Error('请先在阅读设置中填写 DeepSeek API Key。');
   const options=readingOptions(c.model,recoverTruncation);
@@ -39,14 +48,15 @@ export async function completion(messages: unknown[], signal: AbortSignal, recov
     throw new Error(`DeepSeek ${response.status}：${hints[response.status] || '服务请求失败，请稍后继续'}`);
   }
   const data = await response.json() as { choices?: { message: { content: string; refusal?:string }; finish_reason?: string }[];usage?:{prompt_tokens?:number;completion_tokens?:number;completion_tokens_details?:{reasoning_tokens?:number}} };
+  // Report usage before any early return: rejected and truncated attempts are billed too.
+  if(data.usage)onUsage?.({promptTokens:numeric(data.usage.prompt_tokens),completionTokens:numeric(data.usage.completion_tokens),reasoningTokens:numeric(data.usage.completion_tokens_details?.reasoning_tokens)});
   const choice = data.choices?.[0];
-  if (choice?.finish_reason === 'content_filter' || choice?.message.refusal) throw new ModelRefusalError();
-  const content = choice?.message.content;
+  if (choice?.finish_reason === 'content_filter' || choice?.message?.refusal) throw new ModelRefusalError();
+  const content = choice?.message?.content;
   if(isModelRefusal(content))throw new ModelRefusalError();
   // Even valid-looking JSON must never be committed when the provider says it was cut off.
   if (choice?.finish_reason === 'length') {
     if(typeof content==='string'){try{if(isModelRefusal(JSON.parse(content)))throw new ModelRefusalError();}catch(error){if(error instanceof ModelRefusalError)throw error;}}
-    const numeric=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)?value:undefined;
     throw new ModelTruncationError({finishReason:'length',model:c.model,request:options,promptTokens:numeric(data.usage?.prompt_tokens),completionTokens:numeric(data.usage?.completion_tokens),reasoningTokens:numeric(data.usage?.completion_tokens_details?.reasoning_tokens),contentCharacters:typeof content==='string'?content.length:0});
   }
   const {output,adjustments}=parseModelJson(content,{finishReason:choice?.finish_reason,model:c.model,contentCharacters:typeof content==='string'?content.length:0});
@@ -58,48 +68,67 @@ export async function testConnection() {
   const tiny = await sharp({ create: { width: 32, height: 32, channels: 3, background: '#ff0000' } }).png().toBuffer();
   await completion([{ role: 'user', content: [{ type: 'text', text: 'Return JSON only: {"color":"name of the image color"}' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${tiny.toString('base64')}` } }] }], new AbortController().signal);
 }
-export async function readPage(project: Project, signal: AbortSignal, review?:Pick<Reading,'kind'|'confidence'|'reason'>): Promise<Reading> {
+export async function readPage(project: Project, signal: AbortSignal, metrics?: PageMetrics, preparedImages?: ReadingImages): Promise<Reading> {
+  const images = preparedImages || new ReadingImages(project.id, signal);
+  try { return await readPreparedPage(project, signal, images, metrics); }
+  finally { if (!preparedImages) images.close(); }
+}
+async function readPreparedPage(project: Project, signal: AbortSignal, images: ReadingImages, metrics?: PageMetrics): Promise<Reading> {
   const page = project.pages[project.processed];
-  const filename = path.join(projectDir(project.id), 'images', `${page.id}.jpg`);
-  const image = await sharp(filename).resize({ width: 2400, height: 4000, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 88 }).toBuffer();
+  const prepareStarted = Date.now();
   const context = readingContext(project);
-  const content: unknown[] = [{ type: 'text', text: `阅读当前页，正文分格方向为${project.direction === 'rtl' ? '从右到左' : '从左到右'}。forcedStory=true 时用户已确认为正文。前文上下文：${JSON.stringify(context)}` }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${image.toString('base64')}` } }];
-  if(review)content.push({type:'text',text:`这是一次页面分类复核：先前判定 ${review.kind}，置信度 ${review.confidence}，理由 ${review.reason}。结合前页分格、人物和场景连续性重新判断当前页，并返回当前页完整阅读 JSON。无对白、单幅大图或人物特写本身不代表附页；只有明确的广告/版权/封面排版证据才能排除。仍无法判断才 uncertain。不降低内容边界，不把参考页当当前页读取。`});
-  // Previous pages help both classification and identity; future pages are never supplied.
-  for(let i=Math.max(0,project.processed-(review?2:1));i<project.processed;i++){
-    const previous=project.pages[i];
-    if(previous.analysis?.kind!=='story')continue;
-    const buffer=await sharp(path.join(projectDir(project.id),'images',`${previous.id}.jpg`)).resize({width:1200,height:1800,fit:'inside',withoutEnlargement:true}).jpeg({quality:80}).toBuffer();
-    content.push({type:'text',text:`第 ${i+1} 页已读正文参考，仅用于辨认同一人物和场景衔接，不是当前页，不再次提取事件：`},{type:'image_url',image_url:{url:`data:image/jpeg;base64,${buffer.toString('base64')}`}});
+  const contextText = JSON.stringify(context);
+  let previousIndex = project.processed - 1;
+  while (previousIndex >= 0 && project.pages[previousIndex].analysis?.kind !== 'story') previousIndex--;
+  const previous = project.pages[previousIndex];
+  const references = referenceCharacters(project).filter(person => person.avatar);
+  const [image, previousImage, portraits] = await Promise.all([
+    images.page(page),
+    previous ? images.page(previous, 'reference') : Promise.resolve(null),
+    Promise.all(references.map(async person => ({ person, image: await images.avatar(person.avatar!) }))),
+  ]);
+  signal.throwIfAborted();
+  const content: unknown[] = [{ type: 'text', text: `阅读当前页，正文分格方向为${project.direction === 'rtl' ? '从右到左' : '从左到右'}。forcedStory=true 时用户已确认为正文。前文上下文：${contextText}` }, { type: 'image_url', image_url: { url: image } }];
+  if (previousImage) content.push({type:'text',text:`第 ${previousIndex+1} 页已读正文参考，仅用于辨认同一人物和场景衔接，不是当前页，不再次提取事件：`},{type:'image_url',image_url:{url:previousImage}});
+  for (const { person, image } of portraits) if (image) content.push({type:'text',text:`已知人物参考头像（不是当前页）：${person.id} ${person.name}`},{type:'image_url',image_url:{url:image}});
+  if (metrics) {
+    metrics.preparationMs = Date.now() - prepareStarted;
+    metrics.contextCharacters = contextText.length;
+    metrics.imageCount = 1 + Number(!!previousImage) + portraits.filter(p => p.image).length;
   }
-  // Reference portraits help maintain identity across costume changes and long gaps.
-  const portraits=project.characters.filter(c=>c.avatar);
-  const references=[...new Map([...portraits.slice(0,8),...portraits.slice(-8)].map(c=>[c.id,c])).values()];
-  for (const person of references) {
-    const avatarPath = path.join(projectDir(project.id), 'avatars', path.basename(person.avatar!));
-    const buffer = await readFile(avatarPath).catch(() => null);
-    if (buffer) content.push({ type: 'text', text: `已知人物参考头像（不是当前页）：${person.id} ${person.name}` }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${buffer.toString('base64')}` } });
-  }
+  // File processing overlaps the request; the next model call still waits for
+  // this page to be validated, applied and saved by run().
+  images.prefetch(project);
   const messages: {role: string; content: unknown}[] = [
-    { role:'system', content: `${systemPrompt}\n可处理页面的输出必须符合以下 JSON Schema（不要输出 Schema 本身；无法安全处理时只返回前述 blocked 对象）：${JSON.stringify(z.toJSONSchema(readingSchema))}` },
+    { role:'system', content: `${systemPrompt}\n可处理页面的输出必须符合以下 JSON Schema（不要输出 Schema 本身；无法安全处理时只返回前述 blocked 对象）：${modelReadingSchemaText}` },
     { role:'user', content },
   ];
   const attempts: unknown[] = [];
   let recoverTruncation=false;
   const diagnosticDir = path.join(projectDir(project.id), 'diagnostics');
+  // Diagnostics are best effort: a read-only or full data directory must not
+  // turn a valid page into a failed one.
   const saveDiagnostic = async (resolved: boolean) => {
-    await mkdir(diagnosticDir, { recursive: true });
-    await writeFile(path.join(diagnosticDir, `${page.id}.json`), JSON.stringify({ page:project.processed+1, pageId:page.id, recordedAt:new Date().toISOString(), resolved, attempts }, null, 2));
+    try {
+      await mkdir(diagnosticDir, { recursive: true });
+      await writeFile(path.join(diagnosticDir, `${page.id}.json`), JSON.stringify({ page:project.processed+1, pageId:page.id, recordedAt:new Date().toISOString(), resolved, attempts }, null, 2));
+    } catch { /* keep the reading result even when the diagnostic cannot be stored */ }
   };
   // One correction request at most; never skip the page or replace missing story data.
   for (let attempt = 0; attempt < 2; attempt++) {
     signal.throwIfAborted();
+    if(metrics)metrics.attempts++;
     let output: unknown;
     let detail = '';
     let failedText = '';
     let jsonMetadata:Record<string,unknown>|undefined;
     const jsonAdjustments:string[]=[];
-    try { output = await completion(messages, signal,recoverTruncation,adjustments=>jsonAdjustments.push(...adjustments)); }
+    const collectUsage=(usage:TokenUsage)=>{if(!metrics)return;metrics.promptTokens+=usage.promptTokens||0;metrics.completionTokens+=usage.completionTokens||0;metrics.reasoningTokens+=usage.reasoningTokens||0;};
+    const modelStarted = Date.now();
+    try {
+      try { output = await completion(messages, signal,recoverTruncation,adjustments=>jsonAdjustments.push(...adjustments),collectUsage); }
+      finally { if (metrics) metrics.modelMs = (metrics.modelMs || 0) + Date.now() - modelStarted; }
+    }
     catch (error) {
       if(error instanceof ModelTruncationError){
         attempts.push({attempt:attempt+1,type:'truncation',...error.metadata});
@@ -116,16 +145,18 @@ export async function readPage(project: Project, signal: AbortSignal, review?:Pi
     if (!detail) {
       const { parsed, adjustments } = parseReadingOutput(output);
       adjustments.unshift(...jsonAdjustments);
-      if (parsed.success) {
+      const memoryError = parsed.success ? (!parsed.data.memoryMode ? 'memoryMode: 必须明确 delta 或 checkpoint，不能把增量误作完整记忆' : !parsed.data.threadChanges ? 'threadChanges: 无线索变化时返回 []' : memoryIssue(project, parsed.data)) : undefined;
+      if (parsed.success && !memoryError) {
         if (attempts.length || adjustments.length) {
           attempts.push({ attempt:attempt+1, output, adjustments, valid:true });
           await saveDiagnostic(true);
         }
         return parsed.data;
       }
-      detail = describeReadingIssues(parsed.error.issues);
+      const issues = parsed.success ? [{path:['memoryMode'],message:memoryError!}] : parsed.error.issues;
+      detail = describeReadingIssues(issues);
       failedText = JSON.stringify(output);
-      attempts.push({ attempt:attempt+1, output, issues:parsed.error.issues, adjustments });
+      attempts.push({ attempt:attempt+1, output, issues, adjustments });
     } else attempts.push({ attempt:attempt+1, rawContent:failedText, error:detail, ...jsonMetadata });
     await saveDiagnostic(false);
     if (attempt === 1) throw new ReadingOutputError(detail);

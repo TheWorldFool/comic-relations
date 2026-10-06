@@ -14,3 +14,6 @@ coverage/
 *.log
 test-results/
 playwright-report/
+
+# Local experiments can include user comic summaries and character data.
+prototype/out/

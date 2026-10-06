@@ -90,7 +90,8 @@ npm run build # TypeScript 检查与前端构建
 | 位置 | 用途 |
 | --- | --- |
 | `server/analysis.ts` | `systemPrompt` 主提示词、阅读结构、关系阶段更新 |
-| `server/provider.ts` | 模型请求、页面复核、输出校验与自动修正 |
+| `server/provider.ts` | 模型请求、输出校验与自动修正 |
+| `server/reading-memory.ts` / `server/reading-images.ts` | 增量剧情记忆、定期汇总与图片预取缓存 |
 | `server/background-research.ts` | 原作识别、联网背景检索与来源校验提示词 |
 | `server/identity.ts` | 人物身份匹配、归并与引用重写 |
 | `src/RelationshipExplorer.tsx` | 阶段导航、关系图与详情查看 |

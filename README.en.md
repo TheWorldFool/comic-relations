@@ -56,7 +56,7 @@ DeepSeek is the default integration. Custom providers must support the image and
 5. **Explore.** Switch between **阅读对照** (Reading comparison) and **关系工作台** (Relationship workspace). **独立打开关系图** opens an independent tab. Select a stage, inspect a character or relationship, and follow page references back to the comic.
 6. **Correct and export.** Merge duplicate characters, crop replacement portraits, or export the project analysis as JSON.
 
-Changing the order, role, reading direction, or inclusion of already-read pages invalidates the analysis and requires a reset and reread; the UI asks first. Original source files are not modified.
+Changing the order, role, or reading direction of already-read pages invalidates the analysis and requires a reset and reread; the UI asks first. Removing a page that has not been read yet keeps the completed analysis. Original source files are not modified.
 
 ## Data and API usage
 
@@ -90,7 +90,7 @@ Stack: React, TypeScript, Vite, Express, React Flow, Dagre, Sharp, and Zod.
 | Location | Purpose |
 | --- | --- |
 | `server/analysis.ts` | Main `systemPrompt`, reading schema, and stage updates |
-| `server/provider.ts` | Model requests, page review, validation, and correction |
+| `server/provider.ts` | Model requests, validation, and correction |
 | `server/background-research.ts` | Work identification, research, and source-checking prompts |
 | `server/identity.ts` | Identity matching, merging, and reference updates |
 | `src/RelationshipExplorer.tsx` | Stage navigation, graph, and detail views |
@@ -108,3 +108,7 @@ Restart the backend after changing prompts. Existing analysis is not regenerated
 ## License
 
 The code is licensed under the [MIT License](LICENSE). This license does not cover imported comics, character artwork, or third-party material; their respective permissions still apply.
+
+### Reading performance
+
+Story analysis stays sequential. Ordinary pages return incremental memory; periodic checkpoints consolidate it, while unresolved threads persist separately. A bounded per-job image cache prepares the next story page during the current request without sending future pages to the model. Existing projects retain their progress. Per-page timing separates preparation and API time; exports include both the long-term `memory` and pending `readingMemory` entries. These changes have not yet been evaluated for speed and semantic accuracy across a representative comic dataset.

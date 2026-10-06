@@ -7,9 +7,11 @@ import ReviewNotice from './ReviewNotice';
 const IdentityManager=lazy(()=>import('./IdentityManager'));
 const PageSetup=lazy(()=>import('./PageSetup'));
 import { pagesClassified, purposeLabels } from '../shared/page-selection';
-import type { Project, Settings, Page, Box } from '../shared/types';
+import type { Project, Settings, Page, Box, PageTiming } from '../shared/types';
 
 const kindLabels: Record<string,string> = { story:'正文', cover:'封面', ad:'广告', extra:'附页', uncertain:'待复核', blocked:'内容无法处理' };
+const compact=(value?:number)=>value===undefined?'—':value>=1000?`${(value/1000).toFixed(1)}k`:String(value);
+const timingLabel=(timing:PageTiming)=>`用时 ${(timing.elapsedMs/1000).toFixed(1)}s${timing.modelMs!==undefined?` · API ${(timing.modelMs/1000).toFixed(1)}s / 准备 ${((timing.preparationMs||0)/1000).toFixed(1)}s`:''} · 请求 ${timing.attempts} 次 · 输入 ${compact(timing.promptTokens)} / 输出 ${compact(timing.completionTokens)} tokens${timing.reasoningTokens?`（含思考 ${compact(timing.reasoningTokens)}）`:''}`;
 type ProjectOption = { id:string; name:string; pages:number };
 export default function App() {
   const [projects, setProjects] = useState<ProjectOption[]>([]);
@@ -73,8 +75,9 @@ export default function App() {
   const running = project?.status === 'running';
   const locked = busy || running;
   const page = project?.pages[pageIndex];
-  const pageReviewed = page?.analysis?.kind==='uncertain'&&page.override!=='auto';
   const stage = project?.stages[stageIndex === null ? project.stages.length - 1 : Math.min(stageIndex,project.stages.length-1)];
+  const timedPages = project?.pages.filter(p=>p.timing) ?? [];
+  const averageMs = timedPages.length ? Math.round(timedPages.reduce((sum,p)=>sum+p.timing!.elapsedMs,0)/timedPages.length) : 0;
   const selectPerson = useCallback((id:string) => setPersonId(id), []);
   useEffect(()=>{
     if(!project)return;
@@ -112,12 +115,6 @@ export default function App() {
     if(!settings?.hasKey){setSettingsOpen(true);return;}
     await mutate('/read',json('POST'));
   };
-  const confirmAndResume = (override:'story'|'skip') => perform(async()=>{
-    const pending=project?.pages[project.processed];if(!pending)return;
-    setPageIndex(project!.processed);
-    await mutate(`/pages/${pending.id}`,json('PATCH',{override}));
-    await resumeAnalysis();
-  });
 
   return <div className={`app ${wideGraph?'graph-mode':'reading-mode'}`}>
     <header className="app-header">
@@ -134,7 +131,7 @@ export default function App() {
       {syncError && <div className="banner error" role="alert">状态同步失败：{syncError} · 连接恢复后会自动更新。</div>}
       {notice && <div className="toast" role="status"><Check size={16}/>{notice}</div>}
       {project&&project.pages.length>0&&!pagesClassified(project.pages)&&<div className="review-notice"><div className="review-copy"><strong>分析前，请先确认页面用途</strong><p>批量划分正文、封面、广告和附页，确认后再开始阅读。</p></div><button className="button primary" disabled={locked} onClick={()=>setPageSetupOpen(true)}>划分页面</button></div>}
-      {project&&<ReviewNotice project={project} busy={busy} onView={()=>{setPageIndex(project.processed);setWideGraph(false);}} onConfirm={override=>void confirmAndResume(override)} onContinue={()=>void perform(resumeAnalysis)}/>}
+      {project&&<ReviewNotice project={project} busy={busy} onView={()=>{setPageIndex(project.processed);setWideGraph(false);}} onContinue={()=>void perform(resumeAnalysis)}/>}
       <div className="workspace-viewbar"><nav aria-label="工作区视图"><button className={!wideGraph?'active':''} aria-pressed={!wideGraph} onClick={()=>setWideGraph(false)}><BookOpen size={16}/>阅读对照</button><button className={wideGraph?'active':''} aria-pressed={wideGraph} onClick={()=>setWideGraph(true)}><Network size={16}/>关系工作台</button></nav><a className={`button small ${!project?'disabled':''}`} href={graphLink} target="_blank" rel="noopener noreferrer" aria-label="在独立标签页打开关系图"><ExternalLink size={14}/>独立打开关系图</a></div>
       <div className={`workspace ${wideGraph?'graph-wide':''}`}>
         <aside className="pages-panel panel">
@@ -144,7 +141,7 @@ export default function App() {
               <div className="page-thumb"><img src={p.thumbnail} alt="" loading="lazy"/>{i<project.processed&&<span className="processed-mark"><Check size={10}/></span>}</div><div className="page-item-text"><span className="page-number">{String(i+1).padStart(3,'0')}</span><span className="page-name" title={p.name}>{p.name}</span><span className={`page-kind ${p.analysis?.kind==='uncertain'?'warning':''}`}>{p.purpose?purposeLabels[p.purpose]:p.override==='skip'?'已排除':p.override==='story'?'指定正文':p.analysis?kindLabels[p.analysis.kind]:'待划分'}</span></div>{running&&i===project.processed&&<LoaderCircle size={14} className="spin"/>}
             </button>)}
           </div>
-          <div className="page-tools"><button className="icon-button" title="前移页面" disabled={locked||pageIndex===0||!page} onClick={()=>movePage(-1)}><ArrowUp size={15}/></button><button className="icon-button" title="后移页面" disabled={locked||!page||pageIndex===(project?.pages.length||0)-1} onClick={()=>movePage(1)}><ArrowDown size={15}/></button><span>拖动调整顺序</span><button className="icon-button" title="移除当前页" disabled={locked||!page} onClick={()=>{if(page&&window.confirm('从项目移除此页并清除现有分析？'))void perform(async()=>{await mutate(`/pages/${page.id}`,json('DELETE'));setPageIndex(Math.max(0,pageIndex-1));});}}><Trash2 size={15}/></button></div>
+          <div className="page-tools"><button className="icon-button" title="前移页面" disabled={locked||pageIndex===0||!page} onClick={()=>movePage(-1)}><ArrowUp size={15}/></button><button className="icon-button" title="后移页面" disabled={locked||!page||pageIndex===(project?.pages.length||0)-1} onClick={()=>movePage(1)}><ArrowDown size={15}/></button><span>拖动调整顺序</span><button className="icon-button" title="移除当前页" disabled={locked||!page} onClick={()=>{if(!page||!project)return;if(window.confirm(pageIndex<project.processed?'此页已参与分析，移除后需要重新阅读。继续吗？':'从项目移除此页？'))void perform(async()=>{await mutate(`/pages/${page.id}`,json('DELETE'));setPageIndex(Math.max(0,pageIndex-1));});}}><Trash2 size={15}/></button></div>
         </aside>
         <section className="reader-panel panel">
           <div className="panel-header"><h2>原稿阅读</h2><div className="reader-pagination"><button className="icon-button" aria-label="上一页" disabled={pageIndex===0} onClick={()=>setPageIndex(i=>i-1)}><ChevronLeft size={16}/></button><span>{page?`${pageIndex+1} / ${project?.pages.length}`:'— / —'}</span><button className="icon-button" aria-label="下一页" disabled={!page||pageIndex===(project?.pages.length||0)-1} onClick={()=>setPageIndex(i=>i+1)}><ChevronRight size={16}/></button></div></div>
@@ -152,7 +149,7 @@ export default function App() {
             {page ? <div className={`comic-image-wrap ${cropMode?'cropping':''}`} style={{width:`${zoom}%`}} onPointerDown={startCrop} onPointerMove={moveCrop} onPointerUp={()=>{cropStart.current=null;}} onPointerCancel={()=>{cropStart.current=null;}}><img className="comic-image" draggable={false} src={page.image} alt={`第 ${pageIndex+1} 页：${page.name}`}/>{crop&&cropMode&&<div className="crop-box" style={{left:`${crop.x*100}%`,top:`${crop.y*100}%`,width:`${crop.width*100}%`,height:`${crop.height*100}%`}}/>}</div> : <div className="reader-empty"><div className="empty-book"><span/><span/><BookOpen size={40} strokeWidth={1.2}/></div><span className="eyebrow">YOUR STORY STARTS HERE</span><h3>把故事放进来</h3><p>导入一组漫画图片，按页序慢慢展开。<br/>人物、相遇与转变，都有迹可循。</p><button className="button" onClick={()=>filesRef.current?.click()} disabled={busy}><Upload size={15}/>选择漫画图片</button><small>JPG / PNG / WebP / GIF</small></div>}
           </div>
           {cropMode ? <div className="crop-toolbar"><span>在原图拖动框选人物头像</span><button className="button small" onClick={()=>{setCropMode(false);setCrop(null);}}>取消</button><button className="button primary small" disabled={busy||!crop||crop.width<0.005||crop.height<0.005} onClick={()=>void saveCrop()}>保存头像</button></div> : <div className="reader-toolbar"><select aria-label="页面用途" disabled={!page||locked} value={page?.override||'auto'} onChange={e=>{if(!page||!project)return;if(pageIndex<project.processed&&!needsReset())return;void perform(()=>mutate(`/pages/${page.id}`,json('PATCH',{override:e.target.value})));}}><option value="auto">待确认用途</option><option value="story">作为正文</option><option value="skip">排除此页</option></select><div className="zoom-controls"><button className="icon-button" title="缩小" onClick={()=>setZoom(z=>Math.max(50,z-25))}><ZoomOut size={15}/></button><span>{zoom}%</span><button className="icon-button" title="放大" onClick={()=>setZoom(z=>Math.min(300,z+25))}><ZoomIn size={15}/></button><button className="icon-button" title="适应宽度" onClick={()=>setZoom(100)}><Maximize2 size={15}/></button></div></div>}
-          {page?.analysis&&<div className="page-summary"><span className={`tag ${page.analysis.kind==='uncertain'&&!pageReviewed?'amber':''}`}>{pageReviewed?(page.override==='story'?'已确认正文':'已排除'):kindLabels[page.analysis.kind]}</span><p>{pageReviewed?'校正已保存，点击上方“继续分析”接着处理。':page.analysis.kind==='story'?page.analysis.summary:page.analysis.reason}</p></div>}
+          {page?.analysis&&<div className="page-summary"><span className={`tag ${page.analysis.kind==='uncertain'?'amber':''}`}>{kindLabels[page.analysis.kind]}</span><p>{page.analysis.kind==='story'?page.analysis.summary:page.analysis.reason}</p>{page.timing&&<small className="page-timing">{timingLabel(page.timing)}</small>}</div>}
         </section>
         <section className="relations-panel panel">
           <div className="panel-header"><h2>人物关系 <span className="live-label">随故事变化</span></h2><div className="inline-actions"><a className={`icon-button ${!project?'disabled':''}`} title="导出阅读结果 JSON" href={project?`/api/projects/${project.id}/export`:undefined}><Download size={16}/></a><button className="text-button" title={wideGraph?"返回阅读对照":"展开为关系工作台"} onClick={()=>setWideGraph(w=>!w)}><Expand size={14}/>{wideGraph?"返回对照":"展开"}</button></div></div>
@@ -160,7 +157,7 @@ export default function App() {
 
         </section>
       </div>
-          <div className="reading-controls workspace-status">{project?.error&&<div className="job-message" role="alert">{project.error}{project.pages[project.processed]&&<button className="text-button" onClick={()=>{setPageIndex(project.processed);setWideGraph(false);}}>查看待处理页 →</button>}</div>}<div className="reading-progress"><div><span>{running?<><LoaderCircle className="spin" size={12}/>正在阅读第 {(project?.processed||0)+1} 页</>:project?.status==='completed'?'阅读完成':project?.status==='paused'?'阅读已暂停':project?.status==='error'?'本页阅读失败':'准备阅读'}</span><small>{project?.processed||0} / {project?.pages.length||0}</small></div><progress value={project?.processed||0} max={project?.pages.length||1}/></div><div className="reading-buttons"><select aria-label="分格阅读方向" disabled={locked||!project} value={project?.direction||'rtl'} onChange={e=>{if(needsReset())void perform(()=>mutate('',json('PATCH',{direction:e.target.value})));}}><option value="rtl">分格从右到左</option><option value="ltr">分格从左到右</option></select>{project?.processed!==0&&project&&<button className="icon-button" title="清除分析并重新阅读" disabled={locked} onClick={()=>{if(needsReset())void perform(()=>mutate('/reset',json('POST')));}}><RotateCcw size={15}/></button>}<button className="button primary read-button" disabled={busy||!project?.pages.length||project.status==='completed'} onClick={()=>void perform(async()=>{if(running){await api(`/projects/${project!.id}/pause`,json('POST'));setNotice('正在暂停，已完成页面会保留。');}else await resumeAnalysis();})}>{running?<><Pause size={14}/>暂停阅读</>:<><Play size={14}/>{project?.status==='completed'?'阅读完成':project&&!pagesClassified(project.pages)?'先划分页面':project?.status==='paused'||project?.status==='error'||project?.processed?'继续分析':'开始阅读'}</>}</button></div></div>
+          <div className="reading-controls workspace-status">{project?.error&&<div className="job-message" role="alert">{project.error}{project.pages[project.processed]&&<button className="text-button" onClick={()=>{setPageIndex(project.processed);setWideGraph(false);}}>查看待处理页 →</button>}</div>}<div className="reading-progress"><div><span>{running?<><LoaderCircle className="spin" size={12}/>正在阅读第 {(project?.processed||0)+1} 页</>:project?.status==='completed'?'阅读完成':project?.status==='paused'?'阅读已暂停':project?.status==='error'?'本页阅读失败':'准备阅读'}</span><small>{project?.processed||0} / {project?.pages.length||0}{averageMs?` · 均 ${(averageMs/1000).toFixed(1)}s/页`:''}</small></div><progress value={project?.processed||0} max={project?.pages.length||1}/></div><div className="reading-buttons"><select aria-label="分格阅读方向" disabled={locked||!project} value={project?.direction||'rtl'} onChange={e=>{if(needsReset())void perform(()=>mutate('',json('PATCH',{direction:e.target.value})));}}><option value="rtl">分格从右到左</option><option value="ltr">分格从左到右</option></select>{project?.processed!==0&&project&&<button className="icon-button" title="清除分析并重新阅读" disabled={locked} onClick={()=>{if(needsReset())void perform(()=>mutate('/reset',json('POST')));}}><RotateCcw size={15}/></button>}<button className="button primary read-button" disabled={busy||!project?.pages.length||project.status==='completed'} onClick={()=>void perform(async()=>{if(running){await api(`/projects/${project!.id}/pause`,json('POST'));setNotice('正在暂停，已完成页面会保留。');}else await resumeAnalysis();})}>{running?<><Pause size={14}/>暂停阅读</>:<><Play size={14}/>{project?.status==='completed'?'阅读完成':project&&!pagesClassified(project.pages)?'先划分页面':project?.status==='paused'||project?.status==='error'||project?.processed?'继续分析':'开始阅读'}</>}</button></div></div>
       <footer><span>页序决定故事。重大转折，才留下新的阶段。</span><span>原图与阅读进度保存在本机 · 阅读时图片发送至配置的 API</span></footer>
     </main>
     {busy&&<div className="busy-pill" role="status"><LoaderCircle size={15} className="spin"/>处理中…</div>}

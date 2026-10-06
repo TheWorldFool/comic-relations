@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile, rename, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { replaceFile } from './atomic-file.js';
 import path from 'node:path';
 import type { Project } from '../shared/types.js';
 export const dataDir = path.resolve(process.env.DATA_DIR || 'data');
@@ -10,7 +11,7 @@ export async function saveProject(project: Project) {
   project.updatedAt = new Date().toISOString();
   const dir = projectDir(project.id); await mkdir(dir, { recursive: true });
   const tmp = path.join(dir, 'project.json.tmp');
-  await writeFile(tmp, JSON.stringify(project, null, 2)); await rename(tmp, path.join(dir, 'project.json'));
+  await writeFile(tmp, JSON.stringify(project, null, 2)); await replaceFile(tmp, path.join(dir, 'project.json'));
 }
 export async function listProjects() {
   const entries = await readdir(projectsDir, { withFileTypes: true });

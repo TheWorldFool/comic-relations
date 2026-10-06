@@ -2,20 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import sharp from 'sharp';
 import type { Project } from '../shared/types.js';
 
 test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像、断点恢复和重排失效', {timeout:60000}, async t => {
-  let calls=0, failOnce=true;
+  let calls=0, failOnce=true, incrementalFailure=true;
   let releaseSlow!:()=>void,markSlowStarted!:()=>void,markSlowFinished!:()=>void;
   const slowGate=new Promise<void>(resolve=>{releaseSlow=resolve;});
   const slowStarted=new Promise<void>(resolve=>{markSlowStarted=resolve;});
   const slowFinished=new Promise<void>(resolve=>{markSlowFinished=resolve;});
   let searchMode: 'valid'|'repair'|'badRepair'='valid',searchCalls=0;
-  let mode: 'normal' | 'uncertain' | 'slow' | 'repair' | 'invalid' | 'badJson' | 'emptyProperty' | 'emptyAlways' | 'syntaxAlways' | 'refused' | 'textRefused' | 'filterRefused' | 'truncated' | 'truncatedAlways' | 'truncatedRefusal' | 'review' = 'normal';
+  let mode: 'normal' | 'uncertain' | 'slow' | 'repair' | 'invalid' | 'badJson' | 'emptyProperty' | 'emptyAlways' | 'syntaxAlways' | 'refused' | 'textRefused' | 'filterRefused' | 'truncated' | 'truncatedAlways' | 'truncatedRefusal' | 'noMessage' | 'incremental' | 'missingMemoryMode' = 'normal';
   const mock=createServer(async (req,res)=>{
     let body='';for await (const chunk of req)body+=chunk;
     const data=JSON.parse(body);
@@ -40,19 +40,31 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
     assert.ok(blocks.some((b:any)=>b.type==='image_url'&&b.image_url.url.startsWith('data:image/jpeg;base64,')));
     assert.equal(data.response_format.type,'json_object');
     const context=JSON.parse(blocks[0].text.split('前文上下文：')[1]);const n=context.page;calls++;
+    if(mode==='incremental'){
+      assert.equal(context.memoryInstruction,n===6?'checkpoint':'delta');
+      assert.deepEqual(context.memoryState.pending.map((entry:any)=>entry.page),n<=6?Array.from({length:n-1},(_,i)=>i+1):[]);
+      assert.equal(context.memory,n<=6?'':'汇总到第6页');
+      assert.ok(!context.recentPages.some((page:any)=>page.page>=n),'不把未来页作为已读上下文');
+      if(n===3&&incrementalFailure){incrementalFailure=false;res.writeHead(503);res.end('{}');return;}
+      if(n>1)assert.equal(context.memoryState.threads[0].id,'promise');
+      const output={kind:'story',confidence:1,reason:'正文',summary:`第${n}页事件`,storyTime:'',memory:n===6?'汇总到第6页':`增量${n}`,memoryMode:context.memoryInstruction,threadChanges:n===1?[{action:'upsert',id:'promise',text:'尚未兑现的承诺'}]:n===7?[{action:'resolve',id:'promise',text:'本页明确兑现承诺'}]:[],turningPoint:null,characters:[],relationChanges:[]};
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));return;
+    }
+    if(mode==='missingMemoryMode'){
+      const output={kind:'story',confidence:1,reason:'正文',summary:'事件',storyTime:'',memory:'不能判断是增量还是全文',threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));return;
+    }
     if(['refused','textRefused','filterRefused'].includes(mode)){
       const content=mode==='textRefused'?'抱歉，无法处理此请求。':JSON.stringify({status:'blocked',reason:'无法安全处理'});
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content},finish_reason:mode==='filterRefused'?'content_filter':'stop'}]}));return;
     }
-    if(mode==='review'){
-      const reviewing=blocks.some((b:any)=>b.type==='text'&&b.text.includes('这是一次页面分类复核'));
-      if(reviewing&&n>1)assert.ok(blocks.some((b:any)=>b.type==='text'&&b.text.includes('已读正文参考')));
-      const output={kind:reviewing?'story':'uncertain',confidence:reviewing?.95:.5,reason:'分类复核测试',summary:'本页事实',storyTime:'',memory:'累计事实',turningPoint:null,characters:[],relationChanges:[]};
-      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));return;
+    if(mode==='noMessage'){
+      // Compatible providers can answer 200 with a choice that has no message.
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop'}]}));return;
     }
     if(['truncated','truncatedAlways','truncatedRefusal'].includes(mode)){
       const recovering=data.messages.some((m:any)=>m.role==='user'&&typeof m.content==='string'&&m.content.includes('上一轮因输出长度限制'));
-      const valid={kind:'story',confidence:.95,reason:'正文',summary:'完整页面',storyTime:'',memory:'完整新记忆',turningPoint:null,characters:[],relationChanges:[]};
+      const valid={kind:'story',confidence:.95,reason:'正文',summary:'完整页面',storyTime:'',memory:'完整新记忆',memoryMode:'checkpoint',threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
       if(recovering){assert.deepEqual(data.thinking,{type:'disabled'});assert.ok(!data.messages.some((m:any)=>m.role==='assistant'));}
       else{assert.equal(data.reasoning_effort,'low');}
       const truncated=!recovering||mode==='truncatedAlways'||mode==='truncatedRefusal';
@@ -60,13 +72,13 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content},finish_reason:truncated?'length':'stop'}],usage:{prompt_tokens:1500,completion_tokens:32768,completion_tokens_details:{reasoning_tokens:32760}}}));return;
     }
     if(['emptyProperty','emptyAlways','syntaxAlways'].includes(mode)){
-      const valid={kind:'story',confidence:.95,reason:'正文',summary:'甲到达车站',storyTime:'',memory:'甲到达车站',turningPoint:null,characters:[],relationChanges:[]};
+      const valid={kind:'story',confidence:.95,reason:'正文',summary:'甲到达车站',storyTime:'',memory:'甲到达车站',memoryMode:'checkpoint',threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
       const content=mode==='emptyAlways'?'':mode==='syntaxAlways'?'{"summary":}':JSON.stringify(valid).slice(0,-1)+',""}';
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content},finish_reason:'stop'}]}));return;
     }
     if(['repair','invalid','badJson'].includes(mode)){
       const corrected=data.messages.some((m:any)=>m.role==='assistant');
-      let content=JSON.stringify({kind:'story',confidence:.95,reason:'正文',summary:'剧情',storyTime:null,turningPoint:null,...(corrected&&mode!=='invalid'?{memory:'完整剧情记忆'}:{}),characters:[],relationChanges:[]});
+      let content=JSON.stringify({kind:'story',confidence:.95,reason:'正文',summary:'剧情',storyTime:null,memoryMode:'checkpoint',threadChanges:[],turningPoint:null,...(corrected&&mode!=='invalid'?{memory:'完整剧情记忆'}:{}),characters:[],relationChanges:[]});
       if(mode==='badJson'&&!corrected)content='not JSON';
       if(corrected){assert.match(data.messages.at(-1).content,/未通过校验/);assert.ok(data.messages[0].content.includes('JSON Schema'));}
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content},finish_reason:'stop'}]}));return;
@@ -74,13 +86,13 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
     if(mode==='normal'&&n>=3){assert.equal(context.characters[0].statuses[0].target,'b');assert.equal(context.currentPhase.baselineStatuses[0].statuses[0].target,'b');}
     if(mode==='slow'){
       markSlowStarted();await slowGate;
-      const output={kind:'story',confidence:.95,reason:'正文',summary:'延迟请求',storyTime:'',memory:'延迟请求',turningPoint:null,characters:[],relationChanges:[]};
+      const output={kind:'story',confidence:.95,reason:'正文',summary:'延迟请求',storyTime:'',memory:'延迟请求',memoryMode:'checkpoint',threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
       if(!res.destroyed){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));}
       markSlowFinished();return;
     }
     if(n===4&&failOnce){failOnce=false;res.writeHead(503);res.end('{}');return;}
     const people=[{id:'a',name:'小甲',aliases:[],description:'短发',profileUpdates:[{action:'upsert',key:'occupation',label:'职业',value:'调查员',certainty:'confirmed',evidence:'自我介绍'}],statusChanges:[{action:'upsert',key:'trust',label:'信任',value:'信任对方',certainty:'confirmed',evidence:'将任务交给对方',target:'b'}],avatarBox:{x:.1,y:.1,width:.3,height:.3}},{id:'b',name:'小乙',aliases:[],description:'长发',avatarBox:null}];
-    const reading={kind:mode==='uncertain'?'uncertain':n===1?'cover':n===3?'ad':'story',confidence:mode==='uncertain'?.4:.96,reason:'测试分类',summary:'测试剧情',storyTime:'',memory:'已知人物相遇',turningPoint:mode==='normal'&&n===5?{title:'同盟破裂',reason:'正式结束合作并转为对立',confidence:.95}:null,characters:mode==='normal'&&n===2?people:mode==='normal'&&n===4?[{...people[0],id:'named-a',name:'阿甲',nameType:'named',sameAs:{id:'a',confidence:.96,evidence:'相同脸部与场景延续'}}]:[],relationChanges:mode==='normal'&&(n===2||n===5)?[{action:'upsert',source:'a',target:'b',kind:'affiliation',label:n===5?'敌对':'同伴',directed:false,evidence:'漫画对白确认'}]:[]};
+    const reading={kind:mode==='uncertain'?'uncertain':n===1?'cover':n===3?'ad':'story',confidence:mode==='uncertain'?.4:.96,reason:'测试分类',summary:'测试剧情',storyTime:'',memory:'已知人物相遇',memoryMode:'checkpoint',threadChanges:[],turningPoint:mode==='normal'&&n===5?{title:'同盟破裂',reason:'正式结束合作并转为对立',confidence:.95}:null,characters:mode==='normal'&&n===2?people:mode==='normal'&&n===4?[{...people[0],id:'named-a',name:'阿甲',nameType:'named',sameAs:{id:'a',confidence:.96,evidence:'相同脸部与场景延续'}}]:[],relationChanges:mode==='normal'&&(n===2||n===5)?[{action:'upsert',source:'a',target:'b',kind:'affiliation',label:n===5?'敌对':'同伴',directed:false,evidence:'漫画对白确认'}]:[]};
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(reading)},finish_reason:'stop'}]}));
   });
   await new Promise<void>(resolve=>mock.listen(0,'127.0.0.1',resolve));
@@ -98,6 +110,10 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   const form=new FormData();for(const n of [10,2,1,4,3])form.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),`漫画第${n}页.png`);
   let p:Project=await call(root+'/pages','POST',form);
   assert.deepEqual(p.pages.map(p=>p.name),['漫画第1页.png','漫画第2页.png','漫画第3页.png','漫画第4页.png','漫画第10页.png']);
+  const unsupported=new FormData();unsupported.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),'说明.txt');
+  const unsupportedRes=await fetch(base+root+'/pages',{method:'POST',body:unsupported});
+  assert.equal(unsupportedRes.status,400);assert.match(await unsupportedRes.text(),/不支持的文件/);
+  assert.equal((await call(root)).pages.length,5,'被拒绝的文件不得改变页面数量');
   const unclassifiedRead=await fetch(base+root+'/read',{method:'POST'});assert.equal(unclassifiedRead.status,400);assert.equal(calls,0);
   const unclassifiedSearch=await fetch(base+root+'/background/research',{method:'POST'});assert.equal(unclassifiedSearch.status,400);
   p=await call(root+'/page-selection','PUT',{pages:p.pages.map((page,i)=>({id:page.id,purpose:i===0?'cover':i===2?'ad':'story'}))});
@@ -116,10 +132,13 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   const failureMetadata=await readFile(sourcesDiagnostic,'utf8');assert.equal(JSON.parse(failureMetadata).resolved,false);
   assert.ok(!failureMetadata.includes('test-only-key'));assert.ok(!failureMetadata.includes('检索得到的背景'));
   searchMode='valid';
-  const poll=async()=>{let result:Project|undefined;const deadline=Date.now()+15000;while(Date.now()<deadline){result=await call(root);if(result!.status!=='running')return result!;await new Promise(r=>setTimeout(r,100));}throw new Error(`job timeout: ${JSON.stringify({status:result?.status,processed:result?.processed,error:result?.error})} ${serverLog}`);};
+  const poll=async(id:string=created.id)=>{let result:Project|undefined;const deadline=Date.now()+15000;while(Date.now()<deadline){result=await call(`/projects/${id}`);if(result!.status!=='running')return result!;await new Promise(r=>setTimeout(r,100));}throw new Error(`job timeout: ${JSON.stringify({status:result?.status,processed:result?.processed,error:result?.error})} ${serverLog}`);};
   const workContext={originalWork:'测试原作',background:'仅用于身份对照',characterGuide:'阿甲又称小甲'};await call(root,'PATCH',{workContext});
   await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,3);assert.equal(p.stages.length,1);assert.equal(p.stages[0].fromPage,2);assert.equal(p.stages[0].toPage,3);
   assert.equal(p.characters[0].profile![0].value,'调查员');assert.equal(p.characters[0].statuses![0].target,'b');assert.ok(p.characters[0].avatar);assert.equal((await fetch(`http://127.0.0.1:${port}${p.characters[0].avatar}`)).status,200);
+  assert.equal(p.pages[1].timing?.attempts,1,'成功页记录一次请求与耗时');assert.ok((p.pages[1].timing?.elapsedMs||0)>=0);
+  assert.ok(p.pages[1].timing!.modelMs!>=0);assert.ok(p.pages[1].timing!.preparationMs!>=0);assert.ok(p.pages[1].timing!.contextCharacters!>0);assert.equal(p.pages[1].timing!.imageCount,1);
+  assert.equal(p.pages[2].timing,undefined,'跳过的页面不计入模型耗时');
   await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(calls,4);assert.equal(p.stages.length,2);assert.equal(p.stages[0].toPage,4);assert.equal(p.stages[1].fromPage,5);assert.equal(p.pages[2].analysis?.kind,'ad');
   assert.equal(p.characters.length,2);assert.equal(p.characters[0].name,'阿甲');assert.equal(p.identityRedirects!['named-a'],'a');
   const exported:Project=await call(root+'/export');assert.equal(exported.stages[1].relations[0].label,'敌对');
@@ -132,8 +151,12 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   p=await call(root+'/order','PUT',{ids:p.pages.map(pg=>pg.id).reverse()});assert.equal(p.processed,0);assert.equal(p.stages.length,0);assert.equal(p.characters.length,0);
   const invalid=await fetch(base+root+'/order',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[p.pages[0].id,p.pages[0].id]})});assert.equal(invalid.status,400);
   const privateConfig=await fetch(`http://127.0.0.1:${port}/media/${p.id}/../settings.json`);assert.notEqual(privateConfig.status,200);
+  for(const origin of ['http://evil.example','not a url']){
+    const foreignOrigin=await fetch(base+'/settings',{headers:{Origin:origin}});
+    assert.equal(foreignOrigin.status,403,`非本地或畸形 Origin 必须拒绝：${origin}`);
+  }
   const config=await call('/settings');assert.equal(config.hasKey,true);assert.equal(config.apiKey,undefined);
-  mode='uncertain';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(p.pages[0].analysis?.kind,'story','用户指定正文不会再次因分类存疑暂停');
+  mode='uncertain';await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(p.pages[0].analysis?.kind,'story','用户指定正文时模型分类存疑也不暂停');
   p=await call(root+'/reset','POST');p=await call(root+'/page-selection','PUT',{pages:p.pages.map((page,i)=>({id:page.id,purpose:i<2?'extra':'story'}))});
   mode='slow';await call(root+'/read','POST');
   await Promise.race([slowStarted,new Promise<never>((_,reject)=>{setTimeout(()=>reject(new Error(`mock reading did not start: ${serverLog}`)),15000).unref();})]);
@@ -156,10 +179,15 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
     p=await call(root+'/reset','POST');mode=failureMode;const beforeSyntaxFailure:number=calls;
     await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,p.pages.findIndex(page=>page.override!=='skip'),p.error||serverLog);
     assert.equal(calls-beforeSyntaxFailure,2);assert.equal(p.characters.length,0);assert.equal(p.stages.length,0);
+    assert.equal(p.pages[p.processed].timing?.attempts,2,'失败页也记录尝试次数');
     assert.match(p.error||'',failureMode==='emptyAlways'?/未返回正文/:/语法错误/);
     const failure=JSON.parse(await readFile(path.join(dataDir,'projects',p.id,'diagnostics',`${p.pages[p.processed].id}.json`),'utf8'));
     assert.equal(failure.attempts[1].failure,failureMode==='emptyAlways'?'empty':'syntax');assert.equal(failure.attempts[1].finishReason,'stop');
   }
+  p=await call(root+'/reset','POST');mode='noMessage';const beforeNoMessage=calls;
+  await call(root+'/read','POST');p=await poll();
+  assert.equal(p.status,'error');assert.equal(calls-beforeNoMessage,2,'缺少 message 的响应按格式错误处理并重试一次');
+  assert.match(p.error||'',/未返回正文/);assert.doesNotMatch(p.error||'',/refusal|undefined/,'不得把内部异常文本当作错误信息');
 
   p=await call(root+'/reset','POST');p=await call(root+'/page-selection','PUT',{pages:p.pages.map(page=>({id:page.id,purpose:'story'}))});
   for(const refusalMode of ['refused','textRefused','filterRefused'] as const){
@@ -180,6 +208,42 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   p=await call(root+'/reset','POST');p=await call(root+`/pages/${p.pages[0].id}`,'PATCH',{override:'auto'});
   const invalidated=await fetch(base+root+'/read',{method:'POST'});assert.equal(invalidated.status,400);
   p=await call(root+'/page-selection','PUT',{pages:p.pages.map(page=>({id:page.id,purpose:'story'}))});
-  mode='review';const reviewCalls=calls;await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(calls-reviewCalls,5,'用户划分优先，不重复发送分类复核');
+  mode='uncertain';const uncertainCalls=calls;await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(calls-uncertainCalls,5,'用户已确定页面用途，模型分类存疑也不暂停、不重复请求');
+  const appended=await call(root+'/pages','POST',(()=>{const f=new FormData();f.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),'附页.png');return f;})());
+  assert.equal(appended.pages.length,6);assert.equal(appended.processed,5);assert.equal(appended.status,'paused');
+  const beforeAppend=structuredClone(p);
+  const kept=await call(root+`/pages/${appended.pages[5].id}`,'DELETE');
+  assert.equal(kept.processed,5,'移除未读页必须保留已读进度');
+  assert.deepEqual(kept.characters,beforeAppend.characters);assert.deepEqual(kept.stages,beforeAppend.stages);assert.equal(kept.memory,beforeAppend.memory);
+  assert.equal(kept.status,'completed','移除未读的追加页后回到已完成');
+  const wiped=await call(root+`/pages/${kept.pages[0].id}`,'DELETE');
+  assert.equal(wiped.processed,0,'移除已读页清除分析重新阅读');assert.equal(wiped.stages.length,0);assert.equal(wiped.memory,'');
+  const second=await call('/projects','POST',{name:'错误信息'});const secondRoot=`/projects/${second.id}`;
+  const secondForm=new FormData();for(const n of [1,2])secondForm.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),`诊断第${n}页.png`);
+  let bs:Project=await call(secondRoot+'/pages','POST',secondForm);
+  bs=await call(secondRoot+'/page-selection','PUT',{pages:bs.pages.map(page=>({id:page.id,purpose:'story'}))});
+  await writeFile(path.join(dataDir,'projects',bs.id,'diagnostics'),'诊断目录被文件占用');
+  mode='emptyProperty';await call(secondRoot+'/read','POST');bs=await poll(bs.id);
+  assert.equal(bs.status,'completed',bs.error||serverLog);assert.equal(bs.processed,2,'诊断写入失败不得使有效页面失败');
+  await call(secondRoot+'/reset','POST');
+  await rm(path.join(dataDir,'projects',bs.id,'images',`${bs.pages[0].id}.jpg`));
+  await call(secondRoot+'/read','POST');bs=await poll(bs.id);
+  assert.equal(bs.status,'error');assert.match(bs.error||'',/图片/,'缺失图片给出可读提示');
+  assert.ok(!(bs.error||'').includes(dataDir),'错误信息不得包含本机数据目录');
+  const incremental=await call('/projects','POST',{name:'增量记忆连续性'});const incrementalRoot=`/projects/${incremental.id}`;
+  const incrementalForm=new FormData();for(let i=1;i<=7;i++)incrementalForm.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),`${i}.png`);
+  let ip:Project=await call(incrementalRoot+'/pages','POST',incrementalForm);
+  await call(incrementalRoot+'/page-selection','PUT',{pages:ip.pages.map(page=>({id:page.id,purpose:'story'}))});
+  mode='incremental';await call(incrementalRoot+'/read','POST');ip=await poll(ip.id);
+  assert.equal(ip.status,'error');assert.equal(ip.processed,2);assert.equal(ip.readingMemory?.pending.length,2);
+  await call(incrementalRoot+'/read','POST');ip=await poll(ip.id);
+  assert.equal(ip.status,'completed',ip.error||serverLog);assert.equal(ip.memory,'汇总到第6页');
+  assert.deepEqual(ip.readingMemory?.pending,[{page:7,text:'增量7'}]);assert.deepEqual(ip.readingMemory?.threads,[]);
+  assert.equal(ip.stages.length,1,'记忆汇总不是剧情转折');
+  const incDisk:Project=JSON.parse(await readFile(path.join(dataDir,'projects',ip.id,'project.json'),'utf8'));
+  assert.deepEqual(incDisk.readingMemory,ip.readingMemory);
+  await call(incrementalRoot+'/reset','POST');mode='missingMemoryMode';const missingModeCalls=calls;
+  await call(incrementalRoot+'/read','POST');ip=await poll(ip.id);
+  assert.equal(ip.status,'error');assert.equal(ip.processed,0);assert.equal(ip.memory,'');assert.equal(ip.readingMemory,undefined);assert.equal(calls-missingModeCalls,2);assert.match(ip.error||'',/memoryMode/);
   await call('/settings','PUT',{baseUrl:`http://localhost:${mockPort}`,model:'test-vision',apiKey:''});const changed=await call('/settings');assert.equal(changed.hasKey,false,'更换地址后不能回退到环境密钥');
 });
