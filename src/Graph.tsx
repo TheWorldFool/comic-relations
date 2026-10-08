@@ -1,7 +1,7 @@
 import { savedGraphPositions, saveGraphPositions } from './view-preferences';
-import { useEffect, useMemo, useState } from 'react';
-import { ReactFlow, Background, Controls, Handle, Position, MarkerType, BaseEdge, EdgeLabelRenderer, Panel, useNodesState, useReactFlow, useNodesInitialized, useStore, getBezierPath, type NodeProps, type Node, type Edge, type EdgeProps } from '@xyflow/react';
-import { LayoutGrid } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ReactFlow, Background, Handle, Position, MarkerType, BaseEdge, EdgeLabelRenderer, Panel, useNodesState, useReactFlow, useNodesInitialized, useStore, useViewport, getBezierPath, type NodeProps, type Node, type Edge, type EdgeProps } from '@xyflow/react';
+import { LayoutGrid, Maximize2, Minus, Plus, Focus } from 'lucide-react';
 import type { Character, Stage } from '../shared/types';
 import { stateSummaries } from './character-display';
 import { CARD_WIDTH, CARD_HEIGHT, groupRelations, layoutGraph, type Point } from './graph-layout';
@@ -32,19 +32,29 @@ function RelationEdge(props:EdgeProps<RouteEdge>) {
 }
 const nodeTypes = {person:PortraitNode};
 const edgeTypes = {relation:RelationEdge};
-function LayoutTools({onReset,revision}:{onReset:()=>void;revision:string}) {
-  const {fitView} = useReactFlow();
+function LayoutTools({onReset,revision,related}:{onReset:()=>void;revision:string;related:string[]}) {
+  const {fitView,zoomIn,zoomOut,zoomTo} = useReactFlow();
+  const {zoom}=useViewport();
+  const fitted=useRef<string|null>(null);
   const ready = useNodesInitialized();
   const width = useStore(state=>state.width);
   const height = useStore(state=>state.height);
   useEffect(()=>{
-    if (!ready || width<=0 || height<=0) return;
-    const frame=requestAnimationFrame(()=>void fitView({padding:.25,maxZoom:1.1,duration:250}));
+    if (!ready || width<=0 || height<=0 || fitted.current===revision) return;
+    const frame=requestAnimationFrame(()=>{fitted.current=revision;void fitView({padding:.18,maxZoom:1,duration:250});});
     return ()=>cancelAnimationFrame(frame);
   },[ready,revision,width,height,fitView]);
-  return <Panel position="top-right"><button className="graph-arrange" onClick={onReset}><LayoutGrid size={13}/>整理布局</button></Panel>;
+  return <><Panel position="top-right" className="graph-view-actions">
+    {related.length>0&&<button className="graph-arrange" onClick={()=>void fitView({nodes:related.map(id=>({id})),padding:.2,maxZoom:1.1,duration:250})}><Focus size={15}/>定位所选关系</button>}
+    <button className="graph-arrange" title="恢复自动排列的人物位置" onClick={onReset}><LayoutGrid size={15}/>整理布局</button>
+  </Panel><Panel position="bottom-left" className="graph-zoom-tools">
+    <button aria-label="缩小关系图" onClick={()=>void zoomOut({duration:150})}><Minus size={17}/></button>
+    <button title="以原始大小显示人物和文字" aria-label="关系图原始大小" onClick={()=>void zoomTo(1,{duration:200})}>{Math.round(zoom*100)}%</button>
+    <button aria-label="放大关系图" onClick={()=>void zoomIn({duration:150})}><Plus size={17}/></button>
+    <button onClick={()=>void fitView({padding:.18,maxZoom:1,duration:250})}><Maximize2 size={15}/>全图</button>
+  </Panel></>;
 }
-export default function Graph({stage,selectedPerson,selectedGroup,onSelect,onSelectGroup}:{stage:Stage;selectedPerson:string|null;selectedGroup:string|null;onSelect:(id:string)=>void;onSelectGroup:(id:string)=>void}) {
+export default function Graph({stage,selectedPerson,selectedGroup,onSelect,onSelectGroup,viewMode='embedded'}:{viewMode?:string;stage:Stage;selectedPerson:string|null;selectedGroup:string|null;onSelect:(id:string)=>void;onSelectGroup:(id:string)=>void}) {
   const groups=useMemo(()=>groupRelations(stage.relations),[stage.relations]);
   // Polling and avatar edits should not reset the user's dragged positions.
   const topology=JSON.stringify([stage.characters.map(p=>p.id),groups.map(g=>[g.id,g.source,g.target])]);
@@ -72,7 +82,7 @@ export default function Graph({stage,selectedPerson,selectedGroup,onSelect,onSel
       data:{points:route.points,labelPoint:route.label,sourceAnchor:{x:source.x+CARD_WIDTH/2,y:source.y+CARD_HEIGHT},targetAnchor:{x:target.x+CARD_WIDTH/2,y:target.y},count:group.relations.length,active,dimmed,fullLabel:group.relations.map(r=>r.label).join(' / '),onSelect:()=>onSelectGroup(group.id)}}];
   });
   return <ReactFlow nodes={visibleNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={onNodesChange} onNodeDragStop={(_,node)=>saveGraphPositions(stage.id,visibleNodes.map(n=>n.id===node.id?{...n,position:node.position}:n))} fitView fitViewOptions={{padding:.25,maxZoom:1.1}} minZoom={.15} maxZoom={2} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null} proOptions={{hideAttribution:true}}>
-    <Background gap={24} size={1} color="#dfe4dd"/><Controls showInteractive={false}/>
-    <LayoutTools revision={`${topology}-${reset}`} onReset={()=>{const arranged=initial.map(n=>({...n,position:layout.positions.get(n.id)!}));setNodes(arranged);saveGraphPositions(stage.id,arranged);setReset(n=>n+1);}}/>
+    <Background gap={24} size={1} color="#dfe4dd"/>
+    <LayoutTools related={[...related]} revision={`${topology}-${reset}-${viewMode}`} onReset={()=>{const arranged=initial.map(n=>({...n,position:layout.positions.get(n.id)!}));setNodes(arranged);saveGraphPositions(stage.id,arranged);setReset(n=>n+1);}}/>
   </ReactFlow>;
 }

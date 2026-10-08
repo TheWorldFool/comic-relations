@@ -225,7 +225,7 @@
 .relationship-canvas { height: auto; min-height: 0; flex: 1 1 0; }
 .relationship-legend { flex-shrink: 0; color: #63755d; }
 .relationship-inspector { display: none; height: auto; min-height: 0; max-height: none; flex: 1 1 0; border: 0; }
-.relationship-body.has-inspector .relationship-map { display: none; }
+.relationship-body.has-inspector .relationship-map { display: flex; }
 .relationship-body.has-inspector .relationship-inspector { display: flex; }
 .inspector-heading { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 12px; padding: 12px 18px; border-bottom: 1px solid #e6eadf; }
 .inspector-heading strong { font-size: 13px; font-weight: 600; }
@@ -349,3 +349,66 @@
 .review-summary summary { cursor:pointer; font-size:13px; font-weight:600; }
 .review-summary>div { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; margin-top:8px; font-size:12px; }
 .review-summary small { display:block; margin-top:6px; color:#66705f; font-size:11px; }
+/* Relationship viewing: keep the canvas visible and make details secondary. */
+.relationship-explorer { container-type: inline-size; }
+.relationship-stagebar { display: block; }
+.relationship-heading { gap: 10px; padding: 10px 14px; flex-wrap: wrap; }
+.relationship-heading > div:not(.relationship-stage-actions) { flex: 1 1 160px; }
+.relationship-heading h3 { font-size: 14px; -webkit-line-clamp: 1; }
+.relationship-heading > .relationship-stage-actions { flex: 0 1 auto; display: flex; align-items: center; gap: 4px; min-width: 0; }
+.relationship-stage-actions select { border: 1px solid #dce3d7; border-radius: 5px; background: #fffefa; padding: 7px; font-size: 12px; width: 155px; min-width: 0; text-overflow: ellipsis; }
+.graph-focus-button { color: #325b42; border-color: #b9cbb9; white-space: nowrap; }
+.relationship-stagebar .relationship-phases { padding: 4px 14px 10px; }
+.relationship-phases[hidden] { display: none; }
+.relationship-tools { flex: 1 1 auto; padding: 8px 14px; }
+.relationship-tools > span { flex-shrink: 0; font-size: 11px; }
+.graph-person-search { position: relative; flex: 1; max-width: 280px; min-width: 120px; z-index: 12; }
+.graph-person-search label { display: flex; align-items: center; gap: 7px; border: 1px solid #d9e1d2; border-radius: 5px; padding: 7px 9px; background: #fffefa; color: #6d7f67; }
+.graph-person-search input { background: none; border: 0; min-width: 0; width: 100%; font-size: 12px; color: #344b39; outline: none; }
+.graph-person-search label:focus-within { outline: 2px solid #8ca88a; outline-offset: 1px; }
+.graph-search-results { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: #fffefa; border: 1px solid #ccd9c7; border-radius: 6px; box-shadow: 0 8px 25px #263e2926; max-height: 250px; overflow: auto; }
+.graph-search-results button { display: flex; flex-direction: column; width: 100%; text-align: left; padding: 10px 12px; gap: 4px; }
+.graph-search-results button:hover, .graph-search-results button:focus-visible { background: #edf3e7; }
+.graph-search-results strong { font-size: 13px; }
+.graph-search-results small { color: #76836d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.graph-search-results p { font-size: 12px; padding: 14px; color: #74806d; }
+.relationship-views { padding: 0 10px; }
+.relationship-views button { padding: 10px 8px; }
+.relationship-body { position: relative; flex-direction: row; }
+.relationship-body.has-inspector { display: flex; }
+.relationship-body.has-inspector .relationship-inspector { position: absolute; inset: auto 0 0; height: 65%; z-index: 10; border-top: 1px solid #cddac7; box-shadow: 0 -6px 22px #263e2917; border-radius: 10px 10px 0 0; }
+.relationship-inspector[hidden] { display: none; }
+.relationship-map { width: 100%; }
+.graph-selection { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; background: #ecf3e7; border-bottom: 1px solid #dce5d4; font-size: 12px; flex-shrink: 0; }
+.graph-selection > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-selection .text-button { font-size: 12px; }
+.graph-view-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.graph-arrange { font-size: 12px; padding: 8px 10px; }
+.graph-zoom-tools { display: flex; align-items: center; border: 1px solid #d4ddce; border-radius: 7px; background: #fffefa; box-shadow: 0 3px 12px #233c2912; overflow: hidden; }
+.graph-zoom-tools button { display: inline-flex; gap: 6px; align-items: center; justify-content: center; min-width: 36px; height: 36px; padding: 0 9px; color: #3c5e43; font-size: 12px; }
+.graph-zoom-tools button:last-child { border-left: 1px solid #e0e7d8; }
+.graph-zoom-tools button:hover { background: #edf3e7; }
+.relationship-explorer.is-focused { position: fixed; inset: 12px; z-index: 45; border: 1px solid #cdd8c6; border-radius: 10px; background: #fffefa; box-shadow: 0 0 0 20px #eef1e8, 0 12px 45px #233c2929; }
+.relationship-explorer :is(button,select):focus-visible { outline: 2px solid #527c58; outline-offset: 2px; }
+@container (min-width: 880px) {
+  .relationship-body.has-inspector { display: grid; grid-template-columns: minmax(0,1fr) 350px; }
+  .relationship-body.has-inspector .relationship-inspector { position: static; height: auto; border-radius: 0; box-shadow: none; border-top: 0; border-left: 1px solid #dfe5d9; }
+}
+@container (max-width: 600px) {
+  .relationship-heading > .relationship-stage-actions { flex: 1 1 100%; }
+  .relationship-stage-actions select { flex: 1; width: 0; }
+  .relationship-tools { flex-basis: 100%; }
+  .relationship-views { width: 100%; }
+  .relationship-views button { flex: 1; }
+  .relationship-stage-number { height: 32px; width: 32px; font-size: 20px; }
+  .relationship-meta { font-size: 11px; }
+  .relationship-legend { font-size: 10px; padding: 6px 10px; }
+  .graph-view-actions { max-width: calc(100% - 20px); }
+}
+@container (max-width: 879px) {
+  .has-inspector .graph-zoom-tools { top: 10px; bottom: auto; }
+  .has-inspector .graph-view-actions { top: 52px; }
+}
+@media (max-width: 600px) {
+  .relationship-explorer.is-focused { inset: 0; border-radius: 0; }
+}
