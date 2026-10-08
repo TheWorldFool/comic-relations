@@ -9,13 +9,14 @@ import sharp from 'sharp';
 import type { Project } from '../shared/types.js';
 
 test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像、断点恢复和重排失效', {timeout:60000}, async t => {
-  let calls=0, failOnce=true, incrementalFailure=true;
+  let calls=0, failOnce=true, incrementalFailure=true, transientCalls=0;
   let releaseSlow!:()=>void,markSlowStarted!:()=>void,markSlowFinished!:()=>void;
   const slowGate=new Promise<void>(resolve=>{releaseSlow=resolve;});
   const slowStarted=new Promise<void>(resolve=>{markSlowStarted=resolve;});
   const slowFinished=new Promise<void>(resolve=>{markSlowFinished=resolve;});
+  let identityMode:'normal'|'pending'|'match'|'confirm'|'blocked'='normal';
   let searchMode: 'valid'|'repair'|'badRepair'='valid',searchCalls=0;
-  let mode: 'normal' | 'uncertain' | 'slow' | 'repair' | 'invalid' | 'badJson' | 'emptyProperty' | 'emptyAlways' | 'syntaxAlways' | 'refused' | 'textRefused' | 'filterRefused' | 'truncated' | 'truncatedAlways' | 'truncatedRefusal' | 'noMessage' | 'incremental' | 'missingMemoryMode' = 'normal';
+  let mode: 'normal' | 'uncertain' | 'slow' | 'repair' | 'invalid' | 'badJson' | 'emptyProperty' | 'emptyAlways' | 'syntaxAlways' | 'refused' | 'textRefused' | 'filterRefused' | 'truncated' | 'truncatedAlways' | 'truncatedRefusal' | 'noMessage' | 'incremental' | 'missingMemoryMode' | 'checkpointMismatch' | 'emptyCheckpoint' | 'transient' = 'normal';
   const mock=createServer(async (req,res)=>{
     let body='';for await (const chunk of req)body+=chunk;
     const data=JSON.parse(body);
@@ -36,20 +37,36 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
     if(data.messages[0]?.content?.includes?.('你负责识别漫画对应的原作')){
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({originalWork:'测试原作',confidence:.95,evidence:['封面标题'],visibleNames:['小甲']})},finish_reason:'stop'}]}));return;
     }
+    if(data.messages[0]?.content?.startsWith('你负责漫画人物身份复核')){
+      const context=JSON.parse(data.messages[1].content[0].text);
+      if(identityMode==='blocked'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({status:'blocked',reason:'无法安全处理'})},finish_reason:'stop'}]}));return;}
+      const decisions=context.subjects.map((person:any)=>({id:person.id,decision:person.sameAs?'match':'new',target:person.sameAs?.id||null,candidates:[],evidence:person.sameAs?[{kind:'visual',text:'左眼痣一致'},{kind:'continuity',text:'上一页开门动作连续'}]:[{kind:'distinct',text:'本页两人独立对话且外貌不同'}],conflicts:[]}));
+      if(identityMode==='pending')for(const d of decisions){d.decision='pending';d.target=null;d.evidence=[];}
+      if(identityMode==='confirm')for(const d of decisions){d.decision='confirm';d.target=null;d.evidence=[{kind:'distinct',text:'与其他档案的脸部特征明确不同'}];}
+      if(identityMode==='match')for(const d of decisions){d.decision='match';d.target='a';d.evidence=[{kind:'visual',text:'相同耳饰和脸部特征'},{kind:'continuity',text:'翻页前后的动作接续'}];}
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({decisions})},finish_reason:'stop'}]}));return;
+    }
     const blocks=data.messages.find((m:any)=>m.role==='user'&&Array.isArray(m.content)).content;
     assert.ok(blocks.some((b:any)=>b.type==='image_url'&&b.image_url.url.startsWith('data:image/jpeg;base64,')));
     assert.equal(data.response_format.type,'json_object');
     const context=JSON.parse(blocks[0].text.split('前文上下文：')[1]);const n=context.page;calls++;
-    if(mode==='incremental'){
+    if(mode==='incremental'||mode==='checkpointMismatch'||mode==='emptyCheckpoint'){
       assert.equal(context.memoryInstruction,n===6?'checkpoint':'delta');
+      const prompt=data.messages[0].content as string;
+      const example=JSON.parse(prompt.split('本次输出格式示例（占位文字不可作为剧情事实）：\n')[1].split('\n')[0]);
+      const schema=JSON.parse(prompt.split('只返回前述 blocked 对象）：')[1]);
+      assert.equal(example.memoryMode,context.memoryInstruction);
+      assert.equal(schema.properties.memoryMode.const,context.memoryInstruction);
+      assert.match(blocks.at(-1).text,new RegExp(`memoryMode 必须为 "${context.memoryInstruction}"`));
       assert.deepEqual(context.memoryState.pending.map((entry:any)=>entry.page),n<=6?Array.from({length:n-1},(_,i)=>i+1):[]);
       assert.equal(context.memory,n<=6?'':'汇总到第6页');
       assert.ok(!context.recentPages.some((page:any)=>page.page>=n),'不把未来页作为已读上下文');
-      if(n===3&&incrementalFailure){incrementalFailure=false;res.writeHead(503);res.end('{}');return;}
+      if(n===3&&incrementalFailure){incrementalFailure=false;res.writeHead(400);res.end('{}');return;}
       if(n>1)assert.equal(context.memoryState.threads[0].id,'promise');
-      const output={kind:'story',confidence:1,reason:'正文',summary:`第${n}页事件`,storyTime:'',memory:n===6?'汇总到第6页':`增量${n}`,memoryMode:context.memoryInstruction,threadChanges:n===1?[{action:'upsert',id:'promise',text:'尚未兑现的承诺'}]:n===7?[{action:'resolve',id:'promise',text:'本页明确兑现承诺'}]:[],turningPoint:null,characters:[],relationChanges:[]};
+      const output={kind:'story',confidence:1,reason:'正文',summary:`第${n}页事件`,storyTime:'',memory:n===6?(mode==='emptyCheckpoint'?'   ':'汇总到第6页'):`增量${n}`,memoryMode:mode==='checkpointMismatch'&&n===6?'delta':context.memoryInstruction,threadChanges:n===1?[{action:'upsert',id:'promise',text:'尚未兑现的承诺'}]:n===7?[{action:'resolve',id:'promise',text:'本页明确兑现承诺'}]:[],turningPoint:null,characters:[],relationChanges:[]};
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));return;
     }
+    if(mode==='transient'&&++transientCalls<=2){res.writeHead(transientCalls===1?503:429,{'retry-after':'0'});res.end('{}');return;}
     if(mode==='missingMemoryMode'){
       const output={kind:'story',confidence:1,reason:'正文',summary:'事件',storyTime:'',memory:'不能判断是增量还是全文',threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));return;
@@ -64,7 +81,7 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
     }
     if(['truncated','truncatedAlways','truncatedRefusal'].includes(mode)){
       const recovering=data.messages.some((m:any)=>m.role==='user'&&typeof m.content==='string'&&m.content.includes('上一轮因输出长度限制'));
-      const valid={kind:'story',confidence:.95,reason:'正文',summary:'完整页面',storyTime:'',memory:'完整新记忆',memoryMode:'checkpoint',threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
+      const valid={kind:'story',confidence:.95,reason:'正文',summary:'完整页面',storyTime:'',memory:'完整新记忆',memoryMode:context.memoryInstruction,threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
       if(recovering){assert.deepEqual(data.thinking,{type:'disabled'});assert.ok(!data.messages.some((m:any)=>m.role==='assistant'));}
       else{assert.equal(data.reasoning_effort,'low');}
       const truncated=!recovering||mode==='truncatedAlways'||mode==='truncatedRefusal';
@@ -72,13 +89,13 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content},finish_reason:truncated?'length':'stop'}],usage:{prompt_tokens:1500,completion_tokens:32768,completion_tokens_details:{reasoning_tokens:32760}}}));return;
     }
     if(['emptyProperty','emptyAlways','syntaxAlways'].includes(mode)){
-      const valid={kind:'story',confidence:.95,reason:'正文',summary:'甲到达车站',storyTime:'',memory:'甲到达车站',memoryMode:'checkpoint',threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
+      const valid={kind:'story',confidence:.95,reason:'正文',summary:'甲到达车站',storyTime:'',memory:'甲到达车站',memoryMode:context.memoryInstruction,threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
       const content=mode==='emptyAlways'?'':mode==='syntaxAlways'?'{"summary":}':JSON.stringify(valid).slice(0,-1)+',""}';
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content},finish_reason:'stop'}]}));return;
     }
     if(['repair','invalid','badJson'].includes(mode)){
       const corrected=data.messages.some((m:any)=>m.role==='assistant');
-      let content=JSON.stringify({kind:'story',confidence:.95,reason:'正文',summary:'剧情',storyTime:null,memoryMode:'checkpoint',threadChanges:[],turningPoint:null,...(corrected&&mode!=='invalid'?{memory:'完整剧情记忆'}:{}),characters:[],relationChanges:[]});
+      let content=JSON.stringify({kind:'story',confidence:.95,reason:'正文',summary:'剧情',storyTime:null,memoryMode:context.memoryInstruction,threadChanges:[],turningPoint:null,...(corrected&&mode!=='invalid'?{memory:'完整剧情记忆'}:{}),characters:[],relationChanges:[]});
       if(mode==='badJson'&&!corrected)content='not JSON';
       if(corrected){assert.match(data.messages.at(-1).content,/未通过校验/);assert.ok(data.messages[0].content.includes('JSON Schema'));}
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content},finish_reason:'stop'}]}));return;
@@ -86,13 +103,13 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
     if(mode==='normal'&&n>=3){assert.equal(context.characters[0].statuses[0].target,'b');assert.equal(context.currentPhase.baselineStatuses[0].statuses[0].target,'b');}
     if(mode==='slow'){
       markSlowStarted();await slowGate;
-      const output={kind:'story',confidence:.95,reason:'正文',summary:'延迟请求',storyTime:'',memory:'延迟请求',memoryMode:'checkpoint',threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
+      const output={kind:'story',confidence:.95,reason:'正文',summary:'延迟请求',storyTime:'',memory:'延迟请求',memoryMode:context.memoryInstruction,threadChanges:[],turningPoint:null,characters:[],relationChanges:[]};
       if(!res.destroyed){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));}
       markSlowFinished();return;
     }
-    if(n===4&&failOnce){failOnce=false;res.writeHead(503);res.end('{}');return;}
+    if(n===4&&failOnce){failOnce=false;res.writeHead(400);res.end('{}');return;}
     const people=[{id:'a',name:'小甲',aliases:[],description:'短发',profileUpdates:[{action:'upsert',key:'occupation',label:'职业',value:'调查员',certainty:'confirmed',evidence:'自我介绍'}],statusChanges:[{action:'upsert',key:'trust',label:'信任',value:'信任对方',certainty:'confirmed',evidence:'将任务交给对方',target:'b'}],avatarBox:{x:.1,y:.1,width:.3,height:.3}},{id:'b',name:'小乙',aliases:[],description:'长发',avatarBox:null}];
-    const reading={kind:mode==='uncertain'?'uncertain':n===1?'cover':n===3?'ad':'story',confidence:mode==='uncertain'?.4:.96,reason:'测试分类',summary:'测试剧情',storyTime:'',memory:'已知人物相遇',memoryMode:'checkpoint',threadChanges:[],turningPoint:mode==='normal'&&n===5?{title:'同盟破裂',reason:'正式结束合作并转为对立',confidence:.95}:null,characters:mode==='normal'&&n===2?people:mode==='normal'&&n===4?[{...people[0],id:'named-a',name:'阿甲',nameType:'named',sameAs:{id:'a',confidence:.96,evidence:'相同脸部与场景延续'}}]:[],relationChanges:mode==='normal'&&(n===2||n===5)?[{action:'upsert',source:'a',target:'b',kind:'affiliation',label:n===5?'敌对':'同伴',directed:false,evidence:'漫画对白确认'}]:[]};
+    const reading={kind:mode==='uncertain'?'uncertain':n===1?'cover':n===3?'ad':'story',confidence:mode==='uncertain'?.4:.96,reason:'测试分类',summary:'测试剧情',storyTime:'',memory:'已知人物相遇',memoryMode:context.memoryInstruction,threadChanges:[],turningPoint:mode==='normal'&&n===5?{title:'同盟破裂',reason:'正式结束合作并转为对立',confidence:.95}:null,characters:mode==='normal'&&n===2?people:mode==='normal'&&n===4?[{...people[0],id:'named-a',name:'阿甲',nameType:'named',sameAs:{id:'a',confidence:.96,evidence:'相同脸部与场景延续'}}]:[],relationChanges:mode==='normal'&&(n===2||n===5)?[{action:'upsert',source:'a',target:'b',kind:'affiliation',label:n===5?'敌对':'同伴',directed:false,evidence:'漫画对白确认'}]:[]};
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(reading)},finish_reason:'stop'}]}));
   });
   await new Promise<void>(resolve=>mock.listen(0,'127.0.0.1',resolve));
@@ -136,18 +153,64 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   const workContext={originalWork:'测试原作',background:'仅用于身份对照',characterGuide:'阿甲又称小甲'};await call(root,'PATCH',{workContext});
   await call(root+'/read','POST');p=await poll();assert.equal(p.status,'error');assert.equal(p.processed,3);assert.equal(p.stages.length,1);assert.equal(p.stages[0].fromPage,2);assert.equal(p.stages[0].toPage,3);
   assert.equal(p.characters[0].profile![0].value,'调查员');assert.equal(p.characters[0].statuses![0].target,'b');assert.ok(p.characters[0].avatar);assert.equal((await fetch(`http://127.0.0.1:${port}${p.characters[0].avatar}`)).status,200);
-  assert.equal(p.pages[1].timing?.attempts,1,'成功页记录一次请求与耗时');assert.ok((p.pages[1].timing?.elapsedMs||0)>=0);
-  assert.ok(p.pages[1].timing!.modelMs!>=0);assert.ok(p.pages[1].timing!.preparationMs!>=0);assert.ok(p.pages[1].timing!.contextCharacters!>0);assert.equal(p.pages[1].timing!.imageCount,1);
+  assert.equal(p.pages[1].timing?.attempts,2,'新增人物页累计初读与身份复核的请求');assert.ok((p.pages[1].timing?.elapsedMs||0)>=0);
+  assert.ok(p.pages[1].timing!.modelMs!>=0);assert.ok(p.pages[1].timing!.preparationMs!>=0);assert.ok(p.pages[1].timing!.contextCharacters!>0);assert.equal(p.pages[1].timing!.imageCount,2);
   assert.equal(p.pages[2].timing,undefined,'跳过的页面不计入模型耗时');
+  const orderedBefore=structuredClone(p),originalOrder=p.pages.map(page=>page.id),unreadOrder=[...originalOrder];
+  [unreadOrder[3],unreadOrder[4]]=[unreadOrder[4],unreadOrder[3]];
+  p=await call(root+'/order','PUT',{ids:unreadOrder});
+  assert.equal(p.processed,orderedBefore.processed);assert.deepEqual(p.characters,orderedBefore.characters);assert.deepEqual(p.readingMemory,orderedBefore.readingMemory);assert.deepEqual(p.stages,orderedBefore.stages);
+  await call(root+'/order','PUT',{ids:originalOrder});
   await call(root+'/read','POST');p=await poll();assert.equal(p.status,'completed',p.error||serverLog);assert.equal(p.processed,5);assert.equal(calls,4);assert.equal(p.stages.length,2);assert.equal(p.stages[0].toPage,4);assert.equal(p.stages[1].fromPage,5);assert.equal(p.pages[2].analysis?.kind,'ad');
   assert.equal(p.characters.length,2);assert.equal(p.characters[0].name,'阿甲');assert.equal(p.identityRedirects!['named-a'],'a');
   const exported:Project=await call(root+'/export');assert.equal(exported.stages[1].relations[0].label,'敌对');
   const disk:Project=JSON.parse(await readFile(path.join(dataDir,'projects',p.id,'project.json'),'utf8'));assert.equal(disk.processed,5);assert.equal(disk.stages[0].characters[0].statuses![0].target,'b');assert.equal(exported.characters[0].records!.length,2);
+  const correction=await call(root+'/corrections','POST',{kind:'character',personId:'a',name:'人工确认甲',aliases:['阿甲'],description:'已校对',appearance:'短发',nameType:'named'});
+  assert.equal(correction.characters[0].name,'人工确认甲');assert.equal(correction.corrections.length,1);
+  await call(root+'/corrections/'+correction.corrections[0].id,'DELETE');
+  const restoreName=await call(root+'/corrections','POST',{kind:'character',personId:'a',name:p.characters[0].name,aliases:p.characters[0].aliases,description:p.characters[0].description,appearance:p.characters[0].appearance||'',nameType:p.characters[0].nameType||'named'});
+  p=await call(root+'/corrections/'+restoreName.corrections[0].id,'DELETE');
   const beforeMerge=structuredClone(p);
   p=await call(root+'/characters/merge','POST',{source:'b',target:'a'});assert.equal(p.characters.length,1);assert.equal(p.relations.length,0);assert.equal(p.canUndoMerge,true);
   p=await call(root+'/characters/merge/undo','POST');assert.deepEqual(p.characters,beforeMerge.characters);assert.deepEqual(p.stages,beforeMerge.stages);assert.deepEqual(p.relations,beforeMerge.relations);
   p=await call(root+'/characters/merge','POST',{source:'b',target:'a'});p=await call(root,'PATCH',{workContext:{...workContext,background:'新的说明'}});
+  assert.equal(p.canUndoMerge,false);assert.equal(p.canRewindMerge,true);
   const staleUndo=await fetch(base+root+'/characters/merge/undo',{method:'POST'});assert.equal(staleUndo.status,400);
+  const continuationUpload=new FormData();continuationUpload.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),'后续页.png');
+  p=await call(root+'/pages','POST',continuationUpload);
+  p=await call(root+'/page-selection','PUT',{pages:p.pages.map(page=>({id:page.id,purpose:page.purpose||'story'}))});
+  mode='repair';await call(root+'/read','POST');p=await poll();mode='normal';
+  assert.equal(p.processed,6);assert.equal(p.status,'completed');
+  const runsAfterContinuation=structuredClone(p.readingRuns);
+  p=await call(root+'/characters/merge/rewind','POST',{confirm:true});
+  assert.equal(p.characters.length,2);assert.equal(p.workContext?.background,'新的说明');assert.equal(p.canRewindMerge,false);
+  assert.equal(p.processed,5);assert.equal(p.pages.length,6);assert.equal(p.pages[5].analysis,undefined);assert.equal(p.status,'paused');
+  assert.deepEqual(p.readingRuns,runsAfterContinuation);assert.deepEqual(p.stages,beforeMerge.stages);
+  p=await call(root+'/pages/'+p.pages[5].id,'DELETE');assert.deepEqual(p.readingRuns,runsAfterContinuation);
+  // The review is part of page submission; unresolved identities do not stop reading.
+  const identityProject=await call('/projects','POST',{name:'身份待定测试'}),identityRoot=`/projects/${identityProject.id}`;
+  const identityUpload=new FormData();for(let i=1;i<=2;i++)identityUpload.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),`${i}.png`);
+  let identityState:Project=await call(identityRoot+'/pages','POST',identityUpload);
+  await call(identityRoot+'/page-selection','PUT',{pages:identityState.pages.map(pg=>({id:pg.id,purpose:'story'}))});
+  identityMode='pending';await call(identityRoot+'/read','POST');identityState=await poll(identityProject.id);
+  assert.equal(identityState.processed,2);assert.equal(identityState.status,'completed');assert.equal(identityState.pendingIdentities?.length,2);assert.equal(identityState.stages[0].characters.length,0);assert.equal(identityState.relations.length,1);
+  assert.equal(identityState.pages[1].timing?.attempts,2);assert.equal(identityState.pages[1].timing?.identityReviewRequests,1);
+  assert.equal(identityState.characters.length,0);assert.ok(identityState.appearances?.some(a=>a.observed.crop));assert.ok(identityState.pendingIdentities?.every(c=>!c.references?.length));
+  identityState=await call(identityRoot+'/characters/a/confirm','POST');assert.equal(identityState.stages[0].characters.length,1);assert.equal(identityState.stages[0].relations.length,0);
+  const lastReadingTiming=structuredClone(identityState.pages[1].timing),beforeAuditRuns=identityState.readingRuns!.length;
+  identityMode='match';identityState=await call(identityRoot+'/characters/b/review','POST');
+  assert.equal(identityState.processed,2);assert.equal(identityState.characters.length,1);assert.equal(identityState.pendingIdentities?.length,1);assert.equal(identityState.identitySuggestions?.[0].target,'a');assert.equal(identityState.readingRuns!.length,beforeAuditRuns+1);assert.equal(identityState.readingRuns!.at(-1)?.task,'identity-review');assert.deepEqual(identityState.pages[1].timing,lastReadingTiming);
+  identityMode='confirm';identityState=await call(identityRoot+'/characters/b/review','POST');assert.equal(identityState.characters.find(c=>c.id==='b')?.identityState,'confirmed');assert.equal(identityState.stages[0].characters.length,2);assert.equal(identityState.stages[0].relations.length,1);assert.equal(identityState.processed,2);
+  const appearance=identityState.appearances!.find(a=>a.characterId==='b')!,beforeBindingCalls=calls;
+  identityState=await call(identityRoot+'/appearances/bind','POST',{ids:[appearance.id],characterId:null,newName:'第三人',reason:'本次出场具有不同的稳定外貌'});
+  assert.equal(calls,beforeBindingCalls,'人工出场校正不调用模型');
+  assert.equal(identityState.processed,2);assert.equal(identityState.characters.length,3);
+  assert.notEqual(identityState.appearances!.find(a=>a.id===appearance.id)!.characterId,'b');
+  identityState=await call(identityRoot+'/appearances/bind','POST',{ids:[appearance.id],characterId:'b',reason:'撤回本次判断，恢复乙'});
+  identityState=await call(identityRoot+'/characters/merge','POST',{source:'b',target:'a'});assert.equal(identityState.characters.length,2);assert.equal(identityState.stages[0].characters.length,2);
+  await call(identityRoot+'/reset','POST');identityMode='blocked';await call(identityRoot+'/read','POST');identityState=await poll(identityProject.id);
+  assert.equal(identityState.status,'paused');assert.equal(identityState.processed,1);assert.equal(identityState.characters.length,0);assert.equal(identityState.pages[1].analysis?.kind,'blocked');
+  identityMode='normal';
   p=await call(root+'/order','PUT',{ids:p.pages.map(pg=>pg.id).reverse()});assert.equal(p.processed,0);assert.equal(p.stages.length,0);assert.equal(p.characters.length,0);
   const invalid=await fetch(base+root+'/order',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[p.pages[0].id,p.pages[0].id]})});assert.equal(invalid.status,400);
   const privateConfig=await fetch(`http://127.0.0.1:${port}/media/${p.id}/../settings.json`);assert.notEqual(privateConfig.status,200);
@@ -240,10 +303,34 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   assert.equal(ip.status,'completed',ip.error||serverLog);assert.equal(ip.memory,'汇总到第6页');
   assert.deepEqual(ip.readingMemory?.pending,[{page:7,text:'增量7'}]);assert.deepEqual(ip.readingMemory?.threads,[]);
   assert.equal(ip.stages.length,1,'记忆汇总不是剧情转折');
+  assert.equal(ip.pages[5].timing?.attempts,1,'明确汇总任务一次请求即可提交');
   const incDisk:Project=JSON.parse(await readFile(path.join(dataDir,'projects',ip.id,'project.json'),'utf8'));
   assert.deepEqual(incDisk.readingMemory,ip.readingMemory);
+  for(const badCheckpoint of ['checkpointMismatch','emptyCheckpoint'] as const){
+  await call(incrementalRoot+'/reset','POST');mode=badCheckpoint;
+  await call(incrementalRoot+'/read','POST');ip=await poll(ip.id);
+  assert.equal(ip.status,'error');assert.equal(ip.processed,5);assert.equal(ip.memory,'');
+  assert.deepEqual(ip.readingMemory?.pending.map(entry=>entry.page),[1,2,3,4,5]);
+  assert.equal(ip.readingMemory?.threads[0].id,'promise');assert.equal(ip.pages[5].analysis,undefined);
+  assert.equal(ip.pages[5].timing?.attempts,2);assert.match(ip.error||'',/memory/);
+  mode='incremental';await call(incrementalRoot+'/read','POST');ip=await poll(ip.id);
+  assert.equal(ip.status,'completed',ip.error||serverLog);assert.equal(ip.memory,'汇总到第6页');
+  assert.equal(ip.pages[5].timing?.attempts,1);assert.deepEqual(ip.readingMemory?.threads,[]);
+  }
   await call(incrementalRoot+'/reset','POST');mode='missingMemoryMode';const missingModeCalls=calls;
   await call(incrementalRoot+'/read','POST');ip=await poll(ip.id);
   assert.equal(ip.status,'error');assert.equal(ip.processed,0);assert.equal(ip.memory,'');assert.equal(ip.readingMemory,undefined);assert.equal(calls-missingModeCalls,2);assert.match(ip.error||'',/memoryMode/);
+  const resilient=await call('/projects','POST',{name:'恢复与用量'}),resilientRoot=`/projects/${resilient.id}`;
+  const onePage=new FormData();onePage.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),'1.png');
+  let rp:Project=await call(resilientRoot+'/pages','POST',onePage);
+  await call(resilientRoot+'/page-selection','PUT',{pages:rp.pages.map(page=>({id:page.id,purpose:'story'}))});
+  mode='transient';await call(resilientRoot+'/read','POST');rp=await poll(rp.id);
+  assert.equal(rp.status,'completed',rp.error||serverLog);assert.equal(rp.pages[0].timing?.attempts,3);assert.equal(rp.readingRuns?.[0].attempts,3);
+  assert.equal(rp.readingRuns?.[0].model,'deepseek-flash');assert.match(rp.readingRuns?.[0].promptHash||'',/^[a-f0-9]{64}$/);
+  const brokenFile=path.join(dataDir,'projects',rp.id,'project.json');await writeFile(brokenFile,'{broken');
+  const book=(await call('/projects')).find((entry:any)=>entry.id===rp.id);assert.equal(book.unreadable,true);assert.equal(book.recoverable,true);
+  assert.equal((await fetch(base+resilientRoot)).status,400);
+  assert.equal((await fetch(base+resilientRoot+'/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,400);
+  rp=await call(resilientRoot+'/restore','POST',{confirm:true});assert.equal(rp.processed,1);assert.equal(rp.status,'completed');assert.equal(rp.readingRuns?.[0].attempts,3);
   await call('/settings','PUT',{baseUrl:`http://localhost:${mockPort}`,model:'test-vision',apiKey:''});const changed=await call('/settings');assert.equal(changed.hasKey,false,'更换地址后不能回退到环境密钥');
 });

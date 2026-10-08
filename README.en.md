@@ -15,7 +15,7 @@ Yejian is a locally hosted workspace for understanding characters and relationsh
 | Import and ordering | Import images or folders, sort filenames naturally, reorder pages, and choose panel reading direction. |
 | Page selection first | Mark story pages, covers, advertisements, and extras before analysis. Non-story pages are excluded from plot analysis. |
 | Background research | Identify work-specific clues and search for background and character references. Review the sources and explicitly adopt the draft before using it in analysis. |
-| Identity continuity | Track temporary IDs, aliases, appearance, and reference portraits across pages. Manually merge duplicate profiles with conditional undo. |
+| Identity continuity | Store page appearances separately from identities, correct selected assignments, and rebuild current relationships and states from evidence. Review identities when needed; uncertain crops do not automatically enter the reference gallery. |
 | Relationship stages | Update the current stage for routine interactions; create a new stage only for substantial, lasting relationship or status changes. |
 | Character profiles | Record identity, appearance, state, directed attitudes, and page evidence without forcing fixed attributes or invented affinity scores. |
 | Graph workspace | Pan, zoom, rearrange, inspect details, search profiles, and open the graph in an independent browser tab. |

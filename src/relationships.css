@@ -304,3 +304,29 @@
   .workspace-status .reading-progress { min-width: 100%; }
   .graph-mode .workspace-heading { display: none; }
 }
+
+.identity-tabs { flex-wrap: wrap; }
+.correction-editor select { width: 100%; border: 1px solid #dce3d3; padding: 10px; border-radius: 5px; background: #fcfdf9; }
+.modal label.correction-remove { flex-direction: row; align-items: center; line-height: 1.7; }
+.modal .correction-remove input { width: auto; flex-shrink: 0; }
+
+.pending-person { padding:16px 0; border-bottom:1px solid var(--border,#e4e4df); }
+.pending-person p { line-height:1.65; font-size:13px; }
+.pending-person .modal-actions,.pending-candidates { display:flex; flex-wrap:wrap; gap:8px; }
+.identity-reference-images { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0; }
+.identity-reference-images button { display:flex; flex-direction:column; align-items:center; gap:4px; border:0; background:transparent; cursor:pointer; }
+.identity-reference-images img { width:88px; height:100px; object-fit:contain; border-radius:5px; background:#f4f3ee; }
+
+.appearance-toolbar { display:flex; align-items:end; gap:16px; flex-wrap:wrap; margin-bottom:16px; }
+.appearance-toolbar>label:first-child { flex:1; min-width:180px; }
+.appearance-manager label.appearance-check { display:flex; flex-direction:row; align-items:center; gap:8px; margin:0; white-space:nowrap; }
+.appearance-check input { width:auto!important; }
+.appearance-list { display:grid; gap:12px; }
+.appearance-entry { display:grid; grid-template-columns:70px 84px minmax(0,1fr); align-items:start; gap:14px; padding:16px; border:1px solid var(--border,#dedbd4); border-radius:8px; }
+.appearance-crop { padding:0; border:0; background:transparent; cursor:pointer; }
+.appearance-crop img { width:84px; max-height:120px; object-fit:contain; border-radius:4px; }
+.appearance-details small { display:block; margin-top:6px; color:var(--muted,#777); }
+.appearance-details p { margin:8px 0; overflow-wrap:anywhere; }
+.appearance-details details { font-size:12px; }
+.appearance-binding { display:grid; gap:12px; margin-top:20px; padding-top:16px; border-top:1px solid var(--border,#dedbd4); }
+@media(max-width:600px){.appearance-entry { grid-template-columns:60px 1fr; gap:10px; padding:12px; }.appearance-details{grid-column:1/-1;}.appearance-crop img{max-height:90px;}}

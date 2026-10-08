@@ -1,4 +1,6 @@
+import { identityView, appearanceCorrections } from '../shared/identity-people.js';
 import { memoryPlan } from './reading-memory.js';
+import { identityHistory } from './identity-context.js';
 import type { Project, CharacterFact } from '../shared/types.js';
 
 export function readingOptions(model:string,recoverTruncation=false){
@@ -26,14 +28,17 @@ export function referenceCharacters(project:Project){
 }
 const compactFact=({evidence,...fact}:CharacterFact)=>fact;
 export function readingContext(project:Project){
+  project=identityView(project);
   const page=project.pages[project.processed],phase=project.stages.at(-1);
   const active=new Set(referenceCharacters(project).map(c=>c.id));
   return {page:project.processed+1,filename:page.name,direction:project.direction,forcedStory:page.override==='story',
-    workContext:project.workContext||null,identityRedirects:project.identityRedirects||{},
+    appearanceCorrections:appearanceCorrections(project),
+    recentAppearances:(project.appearances||[]).filter(a=>a.page>=project.processed-2).map(a=>({id:a.id,page:a.page,characterId:a.characterId,trackId:a.trackId,observed:a.observed.appearance,outfit:a.observed.outfit,hairStyle:a.observed.hairStyle,referenceApproved:['manual','reviewed'].includes(a.verification)})),
+    manualCorrections:project.corrections||[],workContext:project.workContext||null,identityRedirects:project.identityRedirects||{},
     recentPages:project.pages.slice(0,project.processed).flatMap((p,index)=>p.analysis?.kind==='story'?[{page:index+1,name:p.name,summary:p.analysis.summary,characterIds:p.analysis.characterIds}]:[]).slice(-3),
-    characters:project.characters.map(({avatar,records,profile,statuses,...person})=>({...person,
-      profile:active.has(person.id)?profile:profile?.map(compactFact),
-      statuses:active.has(person.id)?statuses:statuses?.map(compactFact),
+    characters:project.characters.map(({avatar,references,records,profile,statuses,...person})=>({...person,...(person.identityState==='pending'?identityHistory(project,person.id):{}),
+      profile:profile?.map(f=>f.certainty==='uncertain'||f.sincePage>=project.processed-2?f:compactFact(f)),
+      statuses:statuses?.map(f=>f.certainty==='uncertain'||f.sincePage>=project.processed-2?f:compactFact(f)),
       records:active.has(person.id)?records?.filter(r=>r.certainty==='uncertain').slice(-3):undefined})),
     // Current relation states are never pruned: they are needed for old characters returning.
     relations:project.relations.map(({evidence,...relation})=>relation),memory:project.memory,

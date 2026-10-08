@@ -1,3 +1,5 @@
+import { identityPeople } from '../shared/identity-people.js';
+import { bindAppearances } from './appearances.js';
 import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
@@ -6,12 +8,16 @@ import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
-import { projectsDir, projectDir, readProject, saveProject, listProjects, dataDir } from './store.js';
-import { publicSettings, saveSettings, readPage, testConnection, type PageMetrics } from './provider.js';
+import { projectsDir, projectDir, readProject, saveProject, listProjects, listProjectEntries, restoreProject, dataDir } from './store.js';
+import { publicSettings, saveSettings, readPage, testConnection, auditIdentity, type PageMetrics } from './provider.js';
 import { applyReading, resetAnalysis, validateReferences, type Reading } from './analysis.js';
 import { describeReadingIssues, ModelRefusalError, isModelRefusal } from './reading-output.js';
 import type { Project, Page } from '../shared/types.js';
 import { mergeCharacters, resolveIdentities } from './identity.js';
+import { correctionSchema, correctProject } from './corrections.js';
+import { confirmIdentity, addReference } from './identity-state.js';
+import { recordReadingRun, ensureReadingRuns } from './reading-timing.js';
+import { reorderPages } from './page-order.js';
 import { classifyPages } from './page-selection.js';
 import { ReadingImages } from './reading-images.js';
 import { pagesClassified } from '../shared/page-selection.js';
@@ -69,7 +75,7 @@ app.put('/api/settings', async (req, res) => {
   await saveSettings(req.body); res.json(await publicSettings());
 });
 app.post('/api/settings/test', async (_req, res) => { await testConnection(); res.json({ ok: true }); });
-app.get('/api/projects', async (_req, res) => { res.json((await listProjects()).map(p => ({ id: p.id, name: p.name, pages: p.pages.length, updatedAt: p.updatedAt }))); });
+app.get('/api/projects', async (_req, res) => { res.json(await listProjectEntries()); });
 app.post('/api/projects', async (req, res) => {
   const { name } = z.object({ name: z.string().trim().min(1).max(100) }).parse(req.body);
   const project: Project = { id: randomUUID(), name, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), direction: 'rtl', pages: [], characters: [], relations: [], stages: [], memory: '', processed: 0, status: 'idle' };
@@ -81,6 +87,10 @@ app.get('/api/projects/:id', async (req, res) => {
   // lock release finish. Do not invite the UI to resume/edit during that gap.
   if(jobs.has(project.id))project.status='running';
   res.json(project);
+});
+app.post('/api/projects/:id/restore',async(req,res)=>{
+  if(req.body?.confirm!==true)throw new Error('请确认恢复备份；恢复前的项目文件会另行保留。');
+  res.json(await exclusive(req.params.id,()=>restoreProject(String(req.params.id))));
 });
 app.get('/api/projects/:id/export', async (req, res) => {
   const p = await readProject(req.params.id);
@@ -108,6 +118,7 @@ app.post('/api/projects/:id/pages', upload.array('files', 1000), async (req, res
       }
       pages.sort((a,b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }));
       project.pages.push(...pages);
+      project.canUndoMerge=false;
       if (project.status === 'completed') project.status = 'paused';
       await saveProject(project); return project;
     });
@@ -120,7 +131,7 @@ app.patch('/api/projects/:id', async (req, res) => {
   res.json(await exclusive(req.params.id, async () => {
     const p = await readProject(req.params.id);
     if (data.direction && data.direction !== p.direction) resetAnalysis(p);
-    Object.assign(p, data); await saveProject(p); return p;
+    Object.assign(p, data); p.canUndoMerge=false; await saveProject(p); return p;
   }));
 });
 app.put('/api/projects/:id/page-selection',async(req,res)=>{
@@ -133,6 +144,7 @@ app.post('/api/projects/:id/background/research',async(req,res)=>{
     const p=await readProject(req.params.id);
     if(!pagesClassified(p.pages))throw new Error('请先确认正文、封面和附页划分，再识别作品背景。');
     p.backgroundResearch=await researchBackground(p,AbortSignal.timeout(360000),hint);
+    p.canUndoMerge=false;
     await saveProject(p);return p;
   }));
 });
@@ -142,6 +154,7 @@ app.post('/api/projects/:id/background/apply',async(req,res)=>{
     const p=await readProject(req.params.id),r=p.backgroundResearch;
     if(!r||r.id!==researchId||!r.sources.length||(!r.background&&!r.characterGuide))throw new Error('没有可采用的检索结果，请重新查找。');
     p.workContext={originalWork:r.originalWork,background:r.background,characterGuide:r.characterGuide,sources:r.sources};r.accepted=true;
+    p.canUndoMerge=false;
     await saveProject(p);return p;
   }));
 });
@@ -150,7 +163,7 @@ app.post('/api/projects/:id/characters/merge',async(req,res)=>{
   const {source,target}=z.object({source:z.string(),target:z.string()}).parse(req.body);
   res.json(await exclusive(req.params.id,async()=>{
     const p=await readProject(req.params.id),before=structuredClone(p);
-    mergeCharacters(p,source,target);p.canUndoMerge=true;
+    mergeCharacters(p,source,target);p.canUndoMerge=true;p.canRewindMerge=true;
     await writeFile(path.join(projectDir(p.id),'identity-merge-backup.json'),JSON.stringify({before,afterHash:mergeStateHash(p)}));
     await saveProject(p);return p;
   }));
@@ -160,15 +173,78 @@ app.post('/api/projects/:id/characters/merge/undo',async(req,res)=>{
     const p=await readProject(req.params.id);
     const backup=JSON.parse(await readFile(path.join(projectDir(p.id),'identity-merge-backup.json'),'utf8').catch(()=>'null')) as {before:Project;afterHash:string}|null;
     if(!p.canUndoMerge||!backup||backup.afterHash!==mergeStateHash(p))throw new Error('合并后已有新的阅读或编辑，不能直接撤销。请先核对现有档案。');
-    const restored=backup.before;restored.canUndoMerge=false;await saveProject(restored);return restored;
+    const restored=backup.before;restored.canUndoMerge=false;restored.canRewindMerge=false;await saveProject(restored);return restored;
+  }));
+});
+app.post('/api/projects/:id/characters/:characterId/review',async(req,res)=>{
+  res.json(await exclusive(req.params.id,async()=>{
+    const p=await readProject(req.params.id),started=Date.now();
+    const metrics:PageMetrics={attempts:0,promptTokens:0,completionTokens:0,reasoningTokens:0};
+    let outcome:'success'|'error'='error';
+    try{
+      const decisions=await auditIdentity(p,String(req.params.characterId),AbortSignal.timeout(180000),metrics);
+      const decision=decisions[0];
+      if(decision?.decision==='match'&&decision.target){
+        const source=String(req.params.characterId),target=decision.target;
+        const suggestions=p.identitySuggestions??=[];
+        const evidence=decision.evidence.map(e=>e.text).join('；');
+        const old=suggestions.find(s=>s.source===source&&s.target===target);
+        if(old){old.evidence=evidence;old.page=p.processed;}
+        else suggestions.push({source,target,evidence,reviewed:true,page:p.processed});
+      }
+      const subject=identityPeople(p).find(c=>c.id===String(req.params.characterId));
+      if(subject?.identityState==='pending'&&decision){subject.identityCandidates=[...new Set([...(decision.target?[decision.target]:[]),...decision.candidates])];subject.identityEvidence=[...decision.evidence.map(e=>e.text),...decision.conflicts].join('；')||'证据不足，保留待定';}
+      const independent=decision&&['new','confirm'].includes(decision.decision);
+      if(independent&&subject?.identityState==='pending')confirmIdentity(p,subject.id,`AI 复核确认独立身份：${decision.evidence.map(e=>e.text).join('；')}`,'model');
+      p.identityReviewNotice=decision?.decision==='match'?'发现同一人物的证据，请核对候选后合并。':independent?'已确认独立身份，当前人物图已更新。':metrics.identityReviewResult?.issue||'证据仍不足，保留当前档案，未自动合并。';
+      p.canUndoMerge=false;outcome='success';
+      return p;
+    }finally{
+      if(metrics.attempts&&p.pages[p.processed-1])recordReadingRun(p,p.pages[p.processed-1],{...metrics,elapsedMs:Date.now()-started},outcome,'identity-review');
+      await saveProject(p);
+    }
+  }));
+});
+app.post('/api/projects/:id/characters/:characterId/confirm',async(req,res)=>{
+  res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);confirmIdentity(p,String(req.params.characterId));await saveProject(p);return p;}));
+});
+app.post('/api/projects/:id/appearances/bind',async(req,res)=>{
+  const input=z.object({ids:z.array(z.string()).min(1).max(200),characterId:z.string().nullable(),reason:z.string().trim().min(1).max(1000),newName:z.string().trim().min(1).max(200).optional()}).parse(req.body);
+  res.json(await exclusive(req.params.id,async()=>{
+    const p=await readProject(req.params.id);
+    bindAppearances(p,input.ids,input.characterId,input.reason,input.newName);
+    await saveProject(p);return p;
+  }));
+});
+app.post('/api/projects/:id/corrections',async(req,res)=>{
+  const input=correctionSchema.parse(req.body);
+  res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);correctProject(p,input);await saveProject(p);return p;}));
+});
+app.delete('/api/projects/:id/corrections/:correctionId',async(req,res)=>{
+  res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);p.corrections=p.corrections?.filter(c=>c.id!==req.params.correctionId);p.canUndoMerge=false;await saveProject(p);return p;}));
+});
+app.post('/api/projects/:id/characters/merge/rewind',async(req,res)=>{
+  if(req.body?.confirm!==true)throw new Error('请确认回到合并前，后续页面需要重新分析。');
+  res.json(await exclusive(req.params.id,async()=>{
+    const current=await readProject(req.params.id);
+    const backup=JSON.parse(await readFile(path.join(projectDir(current.id),'identity-merge-backup.json'),'utf8').catch(()=>'null')) as {before:Project}|null;
+    if(!current.canRewindMerge||!backup)throw new Error('没有可恢复的最近合并记录。');
+    const restored=backup.before;
+    if(restored.direction!==current.direction||restored.pages.slice(0,restored.processed).some((p,i)=>p.id!==current.pages[i]?.id||p.override!==current.pages[i]?.override))throw new Error('已读页顺序或用途发生变化，不能直接回到该合并记录。');
+    await writeFile(path.join(projectDir(current.id),`project.before-merge-rewind-${Date.now()}.json`),JSON.stringify(current),{flag:'wx'});
+    restored.pages=current.pages.map((page,i)=>i<restored.processed?restored.pages[i]:(({analysis,timing,...raw})=>raw)(page));
+    ensureReadingRuns(current);
+    restored.readingRuns=current.readingRuns;restored.workContext=current.workContext;restored.name=current.name;
+    restored.status=restored.processed<restored.pages.length?'paused':'completed';delete restored.error;
+    restored.canUndoMerge=false;restored.canRewindMerge=false;
+    await saveProject(restored);return restored;
   }));
 });
 app.put('/api/projects/:id/order', async (req, res) => {
   const { ids } = z.object({ ids: z.array(z.string()) }).parse(req.body);
   res.json(await exclusive(req.params.id, async () => {
     const p = await readProject(req.params.id);
-    if (ids.length !== p.pages.length || new Set(ids).size !== ids.length || ids.some(id => !p.pages.find(page => page.id === id))) throw new Error('排序需要包含所有页面且不能重复。');
-    if (ids.some((id, index) => id !== p.pages[index].id)) { p.pages = ids.map(id => p.pages.find(page => page.id === id)!); resetAnalysis(p); }
+    reorderPages(p,ids);
     await saveProject(p); return p;
   }));
 });
@@ -178,6 +254,7 @@ app.patch('/api/projects/:id/pages/:pageId', async (req, res) => {
     const p = await readProject(req.params.id); const index = p.pages.findIndex(page => page.id === req.params.pageId);
     if (index < 0) throw new Error('页面不存在。');
     if (p.pages[index].override !== override) { p.pages[index].override = override; if (index < p.processed) resetAnalysis(p); }
+    p.canUndoMerge=false;
     if(override==='auto')delete p.pages[index].purpose;
     else if(override==='story')p.pages[index].purpose='story';
     else if(!p.pages[index].purpose||p.pages[index].purpose==='story')p.pages[index].purpose='extra';
@@ -188,6 +265,8 @@ app.delete('/api/projects/:id/pages/:pageId', async (req, res) => {
   res.json(await exclusive(req.params.id, async () => {
     const p = await readProject(req.params.id); const index = p.pages.findIndex(page => page.id === req.params.pageId);
     if (index < 0) throw new Error('页面不存在。');
+    ensureReadingRuns(p);
+    p.canUndoMerge=false;
     p.pages.splice(index, 1);
     // Removing a page the analysis does not cover yet cannot invalidate earlier
     // reading; only deleting a read page requires re-reading from the start.
@@ -207,6 +286,8 @@ app.put('/api/projects/:id/characters/:characterId/avatar', async (req, res) => 
     const p = await readProject(req.params.id); const person = p.characters.find(c => c.id === req.params.characterId); const page = p.pages.find(pg => pg.id === input.pageId);
     if (!person || !page) throw new Error('人物或页面不存在。');
     const avatar = await cropAvatar(p.id, page, person.id, input); person.avatar = avatar;
+    addReference(person,{url:avatar,page:p.pages.indexOf(page)+1,view:'manual'});
+    p.canUndoMerge=false;
     for (const stage of p.stages) { const c = stage.characters.find(c => c.id === person.id); if (c) c.avatar = avatar; }
     await saveProject(p); return p;
   }));
@@ -216,7 +297,7 @@ async function cropAvatar(projectId: string, page: Page, characterId: string, bo
   const width = Math.min(page.width - left, Math.max(1, Math.floor(box.width * page.width))); const height = Math.min(page.height - top, Math.max(1, Math.floor(box.height * page.height)));
   const filename = `${characterId}-${randomUUID()}.jpg`; const dir = projectDir(projectId);
   await mkdir(path.join(dir, 'avatars'), { recursive: true });
-  await sharp(path.join(dir, 'images', `${page.id}.jpg`)).extract({ left, top, width, height }).resize(192,192,{fit:'cover'}).jpeg({quality:90}).toFile(path.join(dir, 'avatars', filename));
+  await sharp(path.join(dir, 'images', `${page.id}.jpg`)).extract({ left, top, width, height }).resize(384,384,{fit:'inside',withoutEnlargement:true}).jpeg({quality:90}).toFile(path.join(dir, 'avatars', filename));
   return `/media/${projectId}/avatars/${filename}`;
 }
 async function run(project: Project, controller: AbortController) {
@@ -224,17 +305,18 @@ async function run(project: Project, controller: AbortController) {
   // Per-page cost of the page currently being read, stored once it is settled
   // (applied, refused or failed) so speed work can be measured instead of guessed.
   let measuring: { page: Page; startedAt: number; metrics: PageMetrics } | undefined;
-  const recordTiming = () => {
+  const recordTiming = (outcome:'success'|'error'|'cancelled') => {
     if (!measuring) return;
     const { page, startedAt, metrics } = measuring; measuring = undefined;
-    page.timing = {
-      elapsedMs: Date.now() - startedAt, attempts: metrics.attempts,
+    recordReadingRun(project,page,{
+      elapsedMs: Date.now() - startedAt, attempts: metrics.attempts,identityReviewMs:metrics.identityReviewMs,identityReviewRequests:metrics.identityReviewRequests,identityReviewResult:metrics.identityReviewResult,
       preparationMs: metrics.preparationMs, modelMs: metrics.modelMs,
       contextCharacters: metrics.contextCharacters, imageCount: metrics.imageCount,
+      model:metrics.model,endpointOrigin:metrics.endpointOrigin,promptHash:metrics.promptHash,reasoningEffort:metrics.reasoningEffort,maxTokens:metrics.maxTokens,
       ...(metrics.promptTokens ? { promptTokens: metrics.promptTokens } : {}),
       ...(metrics.completionTokens ? { completionTokens: metrics.completionTokens } : {}),
       ...(metrics.reasoningTokens ? { reasoningTokens: metrics.reasoningTokens } : {}),
-    };
+    },outcome);
   };
   try {
     while (project.processed < project.pages.length && !controller.signal.aborted) {
@@ -246,21 +328,22 @@ async function run(project: Project, controller: AbortController) {
         // never reclassifies a page here.
         measuring = { page, startedAt: Date.now(), metrics: { attempts:0, promptTokens:0, completionTokens:0, reasoningTokens:0 } };
         const reading: Reading = await readPage(project, controller.signal, measuring.metrics, preparedImages);
-        if (controller.signal.aborted) { measuring = undefined; break; }
+        if (controller.signal.aborted) { recordTiming('cancelled'); break; }
         const avatars: Record<string,string> = {};
         if (reading.kind === 'story' || page.override === 'story') {
           const normalized=resolveIdentities(project,reading).reading;
           validateReferences(project, normalized);
-          for (const person of normalized.characters) if (person.avatarBox && !project.characters.find(c => c.id === person.id)?.avatar) avatars[person.id] = await cropAvatar(project.id, page, person.id, person.avatarBox);
+          for (const person of normalized.characters) if (person.avatarBox&&person.presence!=='mentioned') avatars[person.id] = await cropAvatar(project.id, page, person.id, person.avatarBox);
         }
+        if(controller.signal.aborted){recordTiming('cancelled');break;}
         applyReading(project, reading, avatars);
-        recordTiming();
+        recordTiming('success');
       }
       await saveProject(project);
     }
     project.status = controller.signal.aborted ? 'paused' : 'completed';
   } catch (error) {
-    if (!controller.signal.aborted) recordTiming();
+    recordTiming(controller.signal.aborted?'cancelled':'error');
     project.status = controller.signal.aborted || error instanceof ModelRefusalError ? 'paused' : 'error';
     if (error instanceof ModelRefusalError && !controller.signal.aborted) project.pages[project.processed].analysis = {kind:'blocked',confidence:1,reason:error.message,summary:'',storyTime:''};
     if (!controller.signal.aborted) project.error = error instanceof z.ZodError ? `模型输出校验失败：${describeReadingIssues(error.issues)}。本页未提交，已保留进度。` : describeError(error as Error & { code?: string });
@@ -274,7 +357,7 @@ app.post('/api/projects/:id/read', async (req, res) => {
     if (!(await publicSettings()).hasKey) throw new Error('请先配置 API Key。');
     if (project.processed >= project.pages.length) throw new Error('已完成全部阅读；重新阅读请先重置。');
     if (project.pages[project.processed].analysis?.kind === 'blocked' && project.pages[project.processed].override !== 'skip') throw new Error('当前页已被模型拒绝处理，不会重复发送。请排除此页或使用适合的非露骨素材。');
-    project.status = 'running'; delete project.error; await saveProject(project);
+    project.status = 'running'; project.canUndoMerge=false; delete project.error; await saveProject(project);
     const controller = new AbortController(); jobs.set(project.id, controller);
     // Return the running snapshot before the background job can mutate it.
     setImmediate(() => { void run(project, controller).catch(error => console.error('保存阅读结果失败：', error.message)); });

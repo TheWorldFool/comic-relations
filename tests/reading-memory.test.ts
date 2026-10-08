@@ -8,6 +8,14 @@ import type { Project } from '../shared/types.js';
 const project=():Project=>({id:'test',name:'test',createdAt:'',updatedAt:'',direction:'ltr',status:'idle',processed:0,memory:'旧版累计记忆',characters:[],relations:[],stages:[],pages:Array.from({length:10},(_,i)=>({id:`p${i}`,name:`${i}.jpg`,image:'',thumbnail:'',width:100,height:100,override:'story'}))});
 const reading=(overrides:Partial<Reading>={}):Reading=>({kind:'story',confidence:1,reason:'正文',summary:'本页事件',storyTime:'',memory:'增量事件',memoryMode:'delta',threadChanges:[],turningPoint:null,characters:[],relationChanges:[],...overrides});
 
+test('空白汇总及旧格式空记忆不能清空已有剧情；无新增事件的增量仍允许为空',()=>{
+  const p=project();applyReading(p,reading({memory:'重要事件'}));const before=JSON.stringify(p);
+  for(const mode of ['checkpoint',undefined] as const)for(const memory of ['', ' \n\t ']){
+    assert.throws(()=>applyReading(p,reading({memoryMode:mode,memory})),/汇总不能为空/);assert.equal(JSON.stringify(p),before);
+  }
+  applyReading(p,reading({memory:''}));assert.equal(p.memory,'旧版累计记忆');assert.equal(p.readingMemory?.pending[0].text,'重要事件');
+});
+
 test('旧记忆作为检查点继续；跨汇总保留未解线索，已读增量不丢失、不影响阶段',()=>{
   let p=project();
   for(let n=1;n<=5;n++){

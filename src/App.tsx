@@ -6,15 +6,18 @@ const RelationshipExplorer=lazy(()=>import('./RelationshipExplorer'));
 import ReviewNotice from './ReviewNotice';
 const IdentityManager=lazy(()=>import('./IdentityManager'));
 const PageSetup=lazy(()=>import('./PageSetup'));
+import { readingTotals } from '../shared/reading-totals';
+import { changesReadOrder } from '../shared/page-order';
 import { pagesClassified, purposeLabels } from '../shared/page-selection';
 import type { Project, Settings, Page, Box, PageTiming } from '../shared/types';
 
 const kindLabels: Record<string,string> = { story:'正文', cover:'封面', ad:'广告', extra:'附页', uncertain:'待复核', blocked:'内容无法处理' };
 const compact=(value?:number)=>value===undefined?'—':value>=1000?`${(value/1000).toFixed(1)}k`:String(value);
-const timingLabel=(timing:PageTiming)=>`用时 ${(timing.elapsedMs/1000).toFixed(1)}s${timing.modelMs!==undefined?` · API ${(timing.modelMs/1000).toFixed(1)}s / 准备 ${((timing.preparationMs||0)/1000).toFixed(1)}s`:''} · 请求 ${timing.attempts} 次 · 输入 ${compact(timing.promptTokens)} / 输出 ${compact(timing.completionTokens)} tokens${timing.reasoningTokens?`（含思考 ${compact(timing.reasoningTokens)}）`:''}`;
-type ProjectOption = { id:string; name:string; pages:number };
+const timingLabel=(timing:PageTiming)=>`用时 ${(timing.elapsedMs/1000).toFixed(1)}s${timing.modelMs!==undefined?` · API ${(timing.modelMs/1000).toFixed(1)}s / 准备 ${((timing.preparationMs||0)/1000).toFixed(1)}s`:''}${timing.identityReviewMs!==undefined?` · 身份复核 ${(timing.identityReviewMs/1000).toFixed(1)}s`:''}${timing.identityReviewResult?.status==='failed'?` · 复核未完成：${timing.identityReviewResult.issue||'请稍后复核'}`:''} · 请求 ${timing.attempts} 次 · 输入 ${compact(timing.promptTokens)} / 输出 ${compact(timing.completionTokens)} tokens${timing.reasoningTokens?`（含思考 ${compact(timing.reasoningTokens)}）`:''}`;
+type ProjectOption = { id:string; name:string; pages:number;unreadable?:boolean;recoverable?:boolean;backupUpdatedAt?:string };
 export default function App() {
   const [projects, setProjects] = useState<ProjectOption[]>([]);
+  const [unavailableId,setUnavailableId]=useState('');
   const [project, setProject] = useState<Project | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [stageIndex, setStageIndex] = useState<number | null>(null);
@@ -42,7 +45,7 @@ export default function App() {
   projectRef.current = project?.id;
   const refreshList = useCallback(async () => setProjects(await api<ProjectOption[]>('/projects')), []);
   const loadProject = useCallback(async (id: string, initialStageId?:string|null) => {
-    const p = await api<Project>(`/projects/${id}`); setProject(p); setPageIndex(0); const initialStage=p.stages.findIndex(s=>s.id===initialStageId);setStageIndex(initialStage<0?null:initialStage);setPersonId(null); setCropMode(false); localStorage.setItem('comic-project', id);
+    let p:Project;try{p=await api<Project>(`/projects/${id}`);}catch(error){setProject(null);setUnavailableId(id);throw error;}setUnavailableId(''); setProject(p); setPageIndex(0); const initialStage=p.stages.findIndex(s=>s.id===initialStageId);setStageIndex(initialStage<0?null:initialStage);setPersonId(null); setCropMode(false); localStorage.setItem('comic-project', id);
   }, []);
   useEffect(() => { void (async () => {
     try {
@@ -76,6 +79,7 @@ export default function App() {
   const locked = busy || running;
   const page = project?.pages[pageIndex];
   const stage = project?.stages[stageIndex === null ? project.stages.length - 1 : Math.min(stageIndex,project.stages.length-1)];
+  const totals=project?readingTotals(project):null;
   const timedPages = project?.pages.filter(p=>p.timing) ?? [];
   const averageMs = timedPages.length ? Math.round(timedPages.reduce((sum,p)=>sum+p.timing!.elapsedMs,0)/timedPages.length) : 0;
   const selectPerson = useCallback((id:string) => setPersonId(id), []);
@@ -101,7 +105,7 @@ export default function App() {
       const next = await api<Project>(`/projects/${p.id}/pages`, {method:'POST',body:form}); setProject(next); await refreshList(); setPageSetupOpen(true); setNotice(`已导入 ${images.length} 页，请先划分正文和封面。`);
     });
   }
-  async function reorder(ids: string[]) { if (!needsReset()) return; const selected = page?.id; await perform(async () => { await mutate('/order',json('PUT',{ids})); if (selected) setPageIndex(ids.indexOf(selected)); }); }
+  async function reorder(ids: string[]) { if (!project || (changesReadOrder(project,ids) && !needsReset())) return; const selected = page?.id; await perform(async () => { await mutate('/order',json('PUT',{ids})); if (selected) setPageIndex(ids.indexOf(selected)); }); }
   function movePage(delta:number) { if (!project) return; const ids=project.pages.map(p=>p.id); const target=pageIndex+delta; if (target<0||target>=ids.length) return; [ids[pageIndex],ids[target]]=[ids[target],ids[pageIndex]]; void reorder(ids); }
   function cropPoint(e:PointerEvent<HTMLDivElement>) { const r=e.currentTarget.getBoundingClientRect(); return { x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)), y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height)) }; }
   function startCrop(e:PointerEvent<HTMLDivElement>) { if (!cropMode) return; e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); cropStart.current=cropPoint(e); setCrop(null); }
@@ -117,10 +121,11 @@ export default function App() {
   };
 
   return <div className={`app ${wideGraph?'graph-mode':'reading-mode'}`}>
+    {unavailableId&&<div className="job-message" role="alert">项目文件无法读取。{projects.find(p=>p.id===unavailableId)?.recoverable?<><span>可恢复备份（{projects.find(p=>p.id===unavailableId)?.backupUpdatedAt}）。</span><button className="button" disabled={busy} onClick={()=>{if(window.confirm('恢复到最近备份？备份之后的分析可能需要重读，当前文件会保留。'))void perform(async()=>{await api(`/projects/${unavailableId}/restore`,json('POST',{confirm:true}));await loadProject(unavailableId);await refreshList();});}}>恢复最近备份</button></>:<span>没有可用备份，请保留本地数据目录以便人工恢复。</span>}</div>}
     <header className="app-header">
       <div className="brand"><span className="brand-mark"><BookOpen size={23}/></span><strong>页间</strong><span className="brand-subtitle">漫画关系阅读室</span></div>
-      <div className="project-switch"><span className="tiny-label">书架 /</span><select aria-label="选择漫画" value={project?.id || ''} disabled={busy} onChange={e=>void perform(()=>loadProject(e.target.value))}><option value="" disabled>尚未添加漫画</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="icon-button" title="新建漫画" onClick={()=>setNewOpen(true)}><Plus size={17}/></button></div>
-      <button className="button quiet" disabled={!project} onClick={()=>setIdentityOpen(true)}>背景与人物</button>
+      <div className="project-switch"><span className="tiny-label">书架 /</span><select aria-label="选择漫画" value={project?.id || unavailableId || ''} disabled={busy} onChange={e=>void perform(()=>loadProject(e.target.value))}><option value="" disabled>尚未添加漫画</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}{p.unreadable?'（读取失败）':''}</option>)}</select><button className="icon-button" title="新建漫画" onClick={()=>setNewOpen(true)}><Plus size={17}/></button></div>
+      <button className="button quiet" disabled={!project} onClick={()=>setIdentityOpen(true)}>背景与人物{project?.characters.some(c=>c.identityState==='pending')?` · ${project.characters.filter(c=>c.identityState==='pending').length} 待定`:''}</button>
       <button className="button quiet" onClick={()=>setSettingsOpen(true)}><span className={`connection-dot ${settings?.hasKey?'connected':''}`}/><span className="settings-label">阅读设置</span><Settings2 size={16}/></button>
     </header>
     <main>
@@ -157,13 +162,13 @@ export default function App() {
 
         </section>
       </div>
-          <div className="reading-controls workspace-status">{project?.error&&<div className="job-message" role="alert">{project.error}{project.pages[project.processed]&&<button className="text-button" onClick={()=>{setPageIndex(project.processed);setWideGraph(false);}}>查看待处理页 →</button>}</div>}<div className="reading-progress"><div><span>{running?<><LoaderCircle className="spin" size={12}/>正在阅读第 {(project?.processed||0)+1} 页</>:project?.status==='completed'?'阅读完成':project?.status==='paused'?'阅读已暂停':project?.status==='error'?'本页阅读失败':'准备阅读'}</span><small>{project?.processed||0} / {project?.pages.length||0}{averageMs?` · 均 ${(averageMs/1000).toFixed(1)}s/页`:''}</small></div><progress value={project?.processed||0} max={project?.pages.length||1}/></div><div className="reading-buttons"><select aria-label="分格阅读方向" disabled={locked||!project} value={project?.direction||'rtl'} onChange={e=>{if(needsReset())void perform(()=>mutate('',json('PATCH',{direction:e.target.value})));}}><option value="rtl">分格从右到左</option><option value="ltr">分格从左到右</option></select>{project?.processed!==0&&project&&<button className="icon-button" title="清除分析并重新阅读" disabled={locked} onClick={()=>{if(needsReset())void perform(()=>mutate('/reset',json('POST')));}}><RotateCcw size={15}/></button>}<button className="button primary read-button" disabled={busy||!project?.pages.length||project.status==='completed'} onClick={()=>void perform(async()=>{if(running){await api(`/projects/${project!.id}/pause`,json('POST'));setNotice('正在暂停，已完成页面会保留。');}else await resumeAnalysis();})}>{running?<><Pause size={14}/>暂停阅读</>:<><Play size={14}/>{project?.status==='completed'?'阅读完成':project&&!pagesClassified(project.pages)?'先划分页面':project?.status==='paused'||project?.status==='error'||project?.processed?'继续分析':'开始阅读'}</>}</button></div></div>
+          <div className="reading-controls workspace-status">{project?.error&&<div className="job-message" role="alert">{project.error}{project.pages[project.processed]&&<button className="text-button" onClick={()=>{setPageIndex(project.processed);setWideGraph(false);}}>查看待处理页 →</button>}</div>}<div className="reading-progress"><div><span>{running?<><LoaderCircle className="spin" size={12}/>正在阅读第 {(project?.processed||0)+1} 页</>:project?.status==='completed'?'阅读完成':project?.status==='paused'?'阅读已暂停':project?.status==='error'?'本页阅读失败':'准备阅读'}</span><small>{project?.processed||0} / {project?.pages.length||0}{averageMs?` · 最近均 ${(averageMs/1000).toFixed(1)}s/页`:''}{totals?.attempts?` · 累计 ${(totals.elapsedMs/60000).toFixed(1)} 分钟 / ${totals.attempts} 次请求`:''}</small></div><progress value={project?.processed||0} max={project?.pages.length||1}/></div><div className="reading-buttons"><select aria-label="分格阅读方向" disabled={locked||!project} value={project?.direction||'rtl'} onChange={e=>{if(needsReset())void perform(()=>mutate('',json('PATCH',{direction:e.target.value})));}}><option value="rtl">分格从右到左</option><option value="ltr">分格从左到右</option></select>{project?.processed!==0&&project&&<button className="icon-button" title="清除分析并重新阅读" disabled={locked} onClick={()=>{if(needsReset())void perform(()=>mutate('/reset',json('POST')));}}><RotateCcw size={15}/></button>}<button className="button primary read-button" disabled={busy||!project?.pages.length||project.status==='completed'} onClick={()=>void perform(async()=>{if(running){await api(`/projects/${project!.id}/pause`,json('POST'));setNotice('正在暂停，已完成页面会保留。');}else await resumeAnalysis();})}>{running?<><Pause size={14}/>暂停阅读</>:<><Play size={14}/>{project?.status==='completed'?'阅读完成':project&&!pagesClassified(project.pages)?'先划分页面':project?.status==='paused'||project?.status==='error'||project?.processed?'继续分析':'开始阅读'}</>}</button></div></div>
       <footer><span>页序决定故事。重大转折，才留下新的阶段。</span><span>原图与阅读进度保存在本机 · 阅读时图片发送至配置的 API</span></footer>
     </main>
     {busy&&<div className="busy-pill" role="status"><LoaderCircle size={15} className="spin"/>处理中…</div>}
     {newOpen&&<div className="modal-backdrop"><form className="modal compact" onSubmit={e=>{e.preventDefault();void createProject();}}><div className="modal-heading"><h2>新建漫画</h2><button type="button" className="icon-button" aria-label="关闭" onClick={()=>setNewOpen(false)}><X size={18}/></button></div><label>漫画名称<input autoFocus value={name} maxLength={100} onChange={e=>setName(e.target.value)} placeholder="给这段故事起个名字"/></label><button className="button primary" disabled={busy}>创建并开始整理</button></form></div>}
     {pageSetupOpen&&project&&<Suspense fallback={<div className="busy-pill">正在加载页面划分…</div>}><PageSetup key={project.id} project={project} onClose={()=>setPageSetupOpen(false)} onSave={async(pages,resetAnalysis)=>(await mutate('/page-selection',json('PUT',{pages,resetAnalysis})))!} onSearch={async hint=>(await mutate('/background/research',json('POST',{hint})))!} onApply={async researchId=>(await mutate('/background/apply',json('POST',{researchId})))!} onRead={startClassifiedReading}/></Suspense>}
-    {identityOpen&&project&&<Suspense fallback={<div className="busy-pill" role="status">正在加载人物资料…</div>}><IdentityManager key={project.id} project={project} busy={busy} onClose={()=>setIdentityOpen(false)} onPrepare={()=>{setIdentityOpen(false);setPageSetupOpen(true);}} onResearch={async hint=>(await mutate('/background/research',json('POST',{hint})))!} onApply={async researchId=>(await mutate('/background/apply',json('POST',{researchId})))!} onContext={workContext=>mutate('',json('PATCH',{workContext}))} onMerge={async(source,target)=>{await mutate('/characters/merge',json('POST',{source,target}));setPersonId(target);}} onUndo={async()=>{await mutate('/characters/merge/undo',json('POST'));setPersonId(null);}} onPage={page=>{setPageIndex(page-1);setWideGraph(false);setIdentityOpen(false);}}/></Suspense>}
+    {identityOpen&&project&&<Suspense fallback={<div className="busy-pill" role="status">正在加载人物资料…</div>}><IdentityManager key={project.id} project={project} busy={busy} onClose={()=>setIdentityOpen(false)} onPrepare={()=>{setIdentityOpen(false);setPageSetupOpen(true);}} onResearch={async hint=>(await mutate('/background/research',json('POST',{hint})))!} onApply={async researchId=>(await mutate('/background/apply',json('POST',{researchId})))!} onContext={workContext=>mutate('',json('PATCH',{workContext}))} onMerge={async(source,target)=>{await mutate('/characters/merge',json('POST',{source,target}));setPersonId(target);}} onUndo={async()=>{await mutate('/characters/merge/undo',json('POST'));setPersonId(null);}} onRewind={async()=>{await mutate('/characters/merge/rewind',json('POST',{confirm:true}));setPersonId(null);setStageIndex(null);}} onBind={input=>mutate('/appearances/bind',json('POST',input))} onConfirm={id=>mutate(`/characters/${id}/confirm`,json('POST'))} onReview={id=>mutate(`/characters/${id}/review`,json('POST'))} onCorrect={input=>mutate('/corrections',json('POST',input))} onUnlock={id=>mutate(`/corrections/${id}`,json('DELETE'))} onPage={page=>{setPageIndex(page-1);setWideGraph(false);setIdentityOpen(false);}}/></Suspense>}
     {settingsOpen&&settings&&<SettingsModal settings={settings} locked={!!running} onClose={()=>setSettingsOpen(false)} onSave={s=>{setSettings(s);setNotice('阅读设置已保存。');}}/>}
   </div>;
 }

@@ -49,3 +49,16 @@ export function parseModelJson(content:unknown,metadata:Record<string,unknown>={
   if(output===null||typeof output!=='object'||Array.isArray(output))throw new ModelJsonError(content,'JSON: 顶层必须是对象，不能是数组、字符串或空值',{...metadata,failure:'non_object'});
   return {output,adjustments};
 }
+
+
+// Identity-review responses occasionally use a bare decision array despite
+// JSON-object mode. Wrap only that exact JSON form; never repair its facts.
+export function parseIdentityReviewJson(content:unknown,metadata:Record<string,unknown>={}){
+  try{return parseModelJson(content,metadata);}catch(error){
+    if(!(error instanceof ModelJsonError)||error.metadata.failure!=='non_object')throw error;
+    const text=error.content.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');
+    const value:unknown=JSON.parse(text);
+    if(!Array.isArray(value))throw error;
+    return {output:{decisions:value},adjustments:['JSON: 将身份决策数组包装为 decisions 对象']};
+  }
+}

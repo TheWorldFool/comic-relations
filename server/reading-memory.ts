@@ -12,6 +12,10 @@ export function memoryPlan(project: Project): 'delta' | 'checkpoint' {
 }
 
 export function memoryIssue(project: Project, reading: Reading): string | undefined {
+  if (reading.memoryMode !== 'delta' && !reading.memory.trim() &&
+      (project.memory.trim() || project.readingMemory?.pending.some(entry=>entry.text.trim()) || project.readingMemory?.threads.length || reading.summary.trim())) {
+    return 'memory: 汇总不能为空或只有空白；请整合旧摘要、待汇总事件和本页剧情，前文尚未清除';
+  }
   // Old saved projects, integrations and model outputs still use full memory.
   if (reading.memoryMode === 'delta' && memoryPlan(project) === 'checkpoint') return 'memoryMode: 本页要求 checkpoint，请整合旧摘要、pending 及本页事件，不能仅返回增量';
   const seen = new Set<string>();
