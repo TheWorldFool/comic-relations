@@ -24,7 +24,7 @@ export function referenceCharacters(project:Project){
   }
   const recent=project.pages.slice(0,project.processed).filter(p=>p.analysis?.kind==='story').slice(-3);
   recent.forEach((page,index)=>page.analysis?.characterIds?.forEach(id=>scores.set(canonical(id),project.processed+index+1)));
-  return [...project.characters].sort((a,b)=>(scores.get(b.id)||0)-(scores.get(a.id)||0)||a.id.localeCompare(b.id)).slice(0,8);
+  return project.characters.filter(c=>!c.archived).sort((a,b)=>(scores.get(b.id)||0)-(scores.get(a.id)||0)||a.id.localeCompare(b.id)).slice(0,8);
 }
 const compactFact=({evidence,...fact}:CharacterFact)=>fact;
 export function readingContext(project:Project){

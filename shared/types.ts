@@ -1,11 +1,12 @@
 export type PageKind = 'story' | 'cover' | 'ad' | 'extra' | 'uncertain' | 'blocked';
 export type Box = { x: number; y: number; width: number; height: number };
+export interface ManualAppearanceInput {pageId:string;characterId:string|null;name:string;nameType:'named'|'descriptive';appearance:string;reason:string;box:Box;}
 export interface CharacterFact { appearanceId?:string; key:string; label:string; value:string; certainty:'confirmed'|'uncertain'; evidence:string; sincePage:number; target?:string; }
 export interface CharacterRecord extends CharacterFact { section:'profile'|'status'; action:'upsert'|'remove'; }
 export interface CharacterReference { appearanceId?:string; url:string; page:number; view:string; }
 export interface IdentityEvidence { kind:"visual"|"continuity"|"dialogue"|"distinct"; text:string; }
 export interface IdentityDecision { id:string; decision:"match"|"new"|"confirm"|"separate"|"pending"; appearanceId?:string; nameLink?:string; identity?:{name:string;aliases:string[];description:string;appearance:string;nameType:"named"|"descriptive"}; target:string|null; candidates:string[]; evidence:IdentityEvidence[]; conflicts:string[]; }
-export interface Character { identityState?:"pending"|"confirmed"; identityEvidence?:string; identityCandidates?:string[]; references?:CharacterReference[]; id: string; name: string; aliases: string[]; description: string; firstPage: number; avatar?: string; appearance?:string; nameType?:'named'|'descriptive'; profile?:CharacterFact[]; statuses?:CharacterFact[]; records?:CharacterRecord[]; }
+export interface Character { archived?:boolean; identityState?:"pending"|"confirmed"; identityEvidence?:string; identityCandidates?:string[]; references?:CharacterReference[]; id: string; name: string; aliases: string[]; description: string; firstPage: number; avatar?: string; appearance?:string; nameType?:'named'|'descriptive'; profile?:CharacterFact[]; statuses?:CharacterFact[]; records?:CharacterRecord[]; }
 export interface IdentitySuggestion { source:string; target:string; evidence:string; confidence?:number; reviewed?:boolean; page:number; }
 export interface Mention { name:string; evidence:string; page:number; }
 export interface BackgroundSource { title:string; url:string; }
@@ -31,14 +32,16 @@ export interface Appearance {
   profileUpdates:AppearanceFactUpdate[]; statusChanges:AppearanceFactUpdate[];
   bindings:{characterId:string|null;atPage:number;reason:string;method:'model'|'manual'|'merge'}[];
 }
-export interface AppearanceFactEvent { page:number; pageId:string; owner:AppearanceEndpoint; profileUpdates:AppearanceFactUpdate[]; statusChanges:AppearanceFactUpdate[]; }
-export interface AppearanceRelationEvent { page:number; pageId:string; action:'upsert'|'remove'; source:AppearanceEndpoint; target:AppearanceEndpoint; kind:string;label:string;directed:boolean;evidence:string; }
+export interface AppearanceFactEvent { manual?:boolean; evidencePage?:number; page:number; pageId:string; owner:AppearanceEndpoint; profileUpdates:AppearanceFactUpdate[]; statusChanges:AppearanceFactUpdate[]; }
+export interface AppearanceRelationEvent { manual?:boolean; evidencePage?:number; page:number; pageId:string; action:'upsert'|'remove'; source:AppearanceEndpoint; target:AppearanceEndpoint; kind:string;label:string;directed:boolean;evidence:string; }
 export interface IdentityBaseline { throughPage:number; characters:Character[]; relations:Relation[]; }
-export interface Project { appearances?:Appearance[]; appearanceFacts?:AppearanceFactEvent[]; appearanceRelations?:AppearanceRelationEvent[]; identityBaseline?:IdentityBaseline; pendingIdentities?:Character[]; identityReviewNotice?:string; id: string; name: string; createdAt: string; updatedAt: string; direction: 'rtl' | 'ltr'; pages: Page[]; characters: Character[]; relations: Relation[]; stages: Stage[]; memory: string; readingMemory?:ReadingMemory; readingRuns?:ReadingRun[]; processed: number; status: 'idle' | 'running' | 'paused' | 'completed' | 'error'; error?: string; workContext?:WorkContext; backgroundResearch?:BackgroundResearch; identityRedirects?:Record<string,string>; identitySuggestions?:IdentitySuggestion[]; mentions?:Mention[]; canUndoMerge?:boolean; canRewindMerge?:boolean; corrections?:ManualCorrection[]; }
+export type ReadingPhase='preparing'|'reading'|'repairing'|'identity'|'saving';
+export interface ReadingActivity {phase:ReadingPhase;page:number;startedAt:number;}
+export interface Project { readingActivity?:ReadingActivity; appearances?:Appearance[]; appearanceFacts?:AppearanceFactEvent[]; appearanceRelations?:AppearanceRelationEvent[]; identityBaseline?:IdentityBaseline; pendingIdentities?:Character[]; identityReviewNotice?:string; id: string; name: string; createdAt: string; updatedAt: string; direction: 'rtl' | 'ltr'; pages: Page[]; characters: Character[]; relations: Relation[]; stages: Stage[]; memory: string; readingMemory?:ReadingMemory; readingRuns?:ReadingRun[]; processed: number; status: 'idle' | 'running' | 'paused' | 'completed' | 'error'; error?: string; workContext?:WorkContext; backgroundResearch?:BackgroundResearch; identityRedirects?:Record<string,string>; identitySuggestions?:IdentitySuggestion[]; mentions?:Mention[]; canUndoMerge?:boolean; canRewindMerge?:boolean; corrections?:ManualCorrection[]; }
 export interface Settings { baseUrl: string; model: string; hasKey: boolean; }
 
-export type CorrectionInput =
+export type CorrectionInput = {scope?:'once'|'fixed'} & (
   | {kind:'character';personId:string;name:string;aliases:string[];description:string;appearance:string;nameType:'named'|'descriptive'}
   | {kind:'fact';personId:string;section:'profile'|'status';action:'upsert'|'remove';fact:CharacterFact}
-  | {kind:'relation';action:'upsert'|'remove';relation:Relation};
+  | {kind:'relation';action:'upsert'|'remove';relation:Relation});
 export type ManualCorrection = CorrectionInput & {id:string;page:number};

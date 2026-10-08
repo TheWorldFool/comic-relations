@@ -4,14 +4,14 @@ import type { Character, CharacterReference, Project } from '../shared/types.js'
 
 // Pending people and their evidence remain stored, but do not assert graph facts.
 export function visibleCast(project:Project){
-  const known=new Set(project.characters.filter(c=>c.identityState!=='pending').map(c=>c.id));
+  const known=new Set(project.characters.filter(c=>c.identityState!=='pending'&&!c.archived).map(c=>c.id));
   return project.characters.filter(c=>known.has(c.id)).map(c=>({...c,
     statuses:c.statuses?.filter(f=>!f.target||known.has(f.target)),
     records:c.records?.filter(f=>!f.target||known.has(f.target)),
   }));
 }
 export function visibleRelations(project:Project){
-  const known=new Set(project.characters.filter(c=>c.identityState!=='pending').map(c=>c.id));
+  const known=new Set(project.characters.filter(c=>c.identityState!=='pending'&&!c.archived).map(c=>c.id));
   return project.relations.filter(r=>known.has(r.source)&&known.has(r.target));
 }
 export function addReference(person:Character,reference:CharacterReference){

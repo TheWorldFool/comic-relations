@@ -1,5 +1,6 @@
 import { identityPeople } from '../shared/identity-people.js';
-import { bindAppearances } from './appearances.js';
+import { bindAppearances, rebuildAppearanceEvidence } from './appearances.js';
+import { addManualAppearance, manualAppearanceSchema } from './manual-appearance.js';
 import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
@@ -12,9 +13,9 @@ import { projectsDir, projectDir, readProject, saveProject, listProjects, listPr
 import { publicSettings, saveSettings, readPage, testConnection, auditIdentity, type PageMetrics } from './provider.js';
 import { applyReading, resetAnalysis, validateReferences, type Reading } from './analysis.js';
 import { describeReadingIssues, ModelRefusalError, isModelRefusal } from './reading-output.js';
-import type { Project, Page } from '../shared/types.js';
+import type { Project, Page, ReadingActivity } from '../shared/types.js';
 import { mergeCharacters, resolveIdentities } from './identity.js';
-import { correctionSchema, correctProject } from './corrections.js';
+import { correctionSchema, correctProject, unlockCorrection } from './corrections.js';
 import { confirmIdentity, addReference } from './identity-state.js';
 import { recordReadingRun, ensureReadingRuns } from './reading-timing.js';
 import { reorderPages } from './page-order.js';
@@ -49,6 +50,7 @@ const upload = multer({ dest: tempDir, preservePath: true, limits: { fileSize: 3
   cb(new Error(`不支持的文件“${name.length > 80 ? `…${name.slice(-80)}` : name}”：请只导入 JPG、PNG、WebP 或 GIF 图片。`));
 } });
 const jobs = new Map<string, AbortController>();
+const activities=new Map<string,ReadingActivity>();
 const locks = new Set<string>();
 async function exclusive<T>(id: string, fn: () => Promise<T>): Promise<T> {
   if (locks.has(id) || jobs.has(id)) throw new Error('项目正在处理，请暂停后再修改。');
@@ -85,7 +87,7 @@ app.get('/api/projects/:id', async (req, res) => {
   const project=await readProject(req.params.id);
   // A final snapshot may be visible on disk before the job's final save and
   // lock release finish. Do not invite the UI to resume/edit during that gap.
-  if(jobs.has(project.id))project.status='running';
+  if(jobs.has(project.id)){project.status='running';project.readingActivity=activities.get(project.id);}
   res.json(project);
 });
 app.post('/api/projects/:id/restore',async(req,res)=>{
@@ -208,6 +210,15 @@ app.post('/api/projects/:id/characters/:characterId/review',async(req,res)=>{
 app.post('/api/projects/:id/characters/:characterId/confirm',async(req,res)=>{
   res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);confirmIdentity(p,String(req.params.characterId));await saveProject(p);return p;}));
 });
+app.post('/api/projects/:id/appearances',async(req,res)=>{
+  const input=manualAppearanceSchema.parse(req.body);
+  res.json(await exclusive(req.params.id,async()=>{
+    const p=await readProject(req.params.id),id=addManualAppearance(p,input);
+    const entry=p.appearances!.find(a=>a.id===id)!;
+    entry.observed.crop=await cropAvatar(p.id,p.pages.find(page=>page.id===input.pageId)!,randomUUID(),input.box);
+    rebuildAppearanceEvidence(p);await saveProject(p);return p;
+  }));
+});
 app.post('/api/projects/:id/appearances/bind',async(req,res)=>{
   const input=z.object({ids:z.array(z.string()).min(1).max(200),characterId:z.string().nullable(),reason:z.string().trim().min(1).max(1000),newName:z.string().trim().min(1).max(200).optional()}).parse(req.body);
   res.json(await exclusive(req.params.id,async()=>{
@@ -221,7 +232,7 @@ app.post('/api/projects/:id/corrections',async(req,res)=>{
   res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);correctProject(p,input);await saveProject(p);return p;}));
 });
 app.delete('/api/projects/:id/corrections/:correctionId',async(req,res)=>{
-  res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);p.corrections=p.corrections?.filter(c=>c.id!==req.params.correctionId);p.canUndoMerge=false;await saveProject(p);return p;}));
+  res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);unlockCorrection(p,String(req.params.correctionId));await saveProject(p);return p;}));
 });
 app.post('/api/projects/:id/characters/merge/rewind',async(req,res)=>{
   if(req.body?.confirm!==true)throw new Error('请确认回到合并前，后续页面需要重新分析。');
@@ -326,9 +337,10 @@ async function run(project: Project, controller: AbortController) {
       } else {
         // Page purpose is fixed by the user before reading starts, so the model
         // never reclassifies a page here.
-        measuring = { page, startedAt: Date.now(), metrics: { attempts:0, promptTokens:0, completionTokens:0, reasoningTokens:0 } };
+        measuring = { page, startedAt: Date.now(), metrics: { attempts:0, promptTokens:0, completionTokens:0, reasoningTokens:0,onPhase:phase=>activities.set(project.id,{phase,page:project.processed+1,startedAt:measuring!.startedAt}) } };
         const reading: Reading = await readPage(project, controller.signal, measuring.metrics, preparedImages);
         if (controller.signal.aborted) { recordTiming('cancelled'); break; }
+        measuring.metrics.onPhase?.('saving');
         const avatars: Record<string,string> = {};
         if (reading.kind === 'story' || page.override === 'story') {
           const normalized=resolveIdentities(project,reading).reading;
@@ -347,7 +359,7 @@ async function run(project: Project, controller: AbortController) {
     project.status = controller.signal.aborted || error instanceof ModelRefusalError ? 'paused' : 'error';
     if (error instanceof ModelRefusalError && !controller.signal.aborted) project.pages[project.processed].analysis = {kind:'blocked',confidence:1,reason:error.message,summary:'',storyTime:''};
     if (!controller.signal.aborted) project.error = error instanceof z.ZodError ? `模型输出校验失败：${describeReadingIssues(error.issues)}。本页未提交，已保留进度。` : describeError(error as Error & { code?: string });
-  } finally { preparedImages.close(); try { await saveProject(project); } finally { jobs.delete(project.id); } }
+  } finally { preparedImages.close(); try { await saveProject(project); } finally { jobs.delete(project.id);activities.delete(project.id); } }
 }
 app.post('/api/projects/:id/read', async (req, res) => {
   const p = await exclusive(req.params.id, async () => {

@@ -1,3 +1,4 @@
+import { refreshCastEvidence } from './cast-evidence.js';
 import { randomUUID } from 'node:crypto';
 import type { Appearance, AppearanceEndpoint, Project, Character } from '../shared/types.js';
 import { identityPeople, separatePending } from '../shared/identity-people.js';
@@ -49,9 +50,11 @@ export function recordAppearancePage(project:Project,reading:Reading,avatars:Rec
     const saved=project.relations.find(old=>relationKey(old)===relationKey(r)&&old.sincePage===number);
     if(saved){saved.sourceAppearanceId=source.appearanceId;saved.targetAppearanceId=target.appearanceId;}
   }
+  refreshCastEvidence(project);
 }
 
 export function refreshAppearanceReferences(project:Project){
+  refreshCastEvidence(project);
   const people=identityPeople(project);
   for(const person of people){
     const oldUrls=new Set(person.references?.filter(r=>r.appearanceId).map(r=>r.url));
@@ -81,7 +84,7 @@ export function rebuildAppearanceEvidence(project:Project){
     const base=project.identityBaseline.characters.find(c=>c.id===person.id);
     person.profile=structuredClone(base?.profile||[]);person.statuses=structuredClone(base?.statuses||[]);person.records=structuredClone(base?.records||[]);
   }
-  const facts=[...(project.appearances||[]).map(a=>({...a,owner:{appearanceId:a.id} as AppearanceEndpoint})),...(project.appearanceFacts||[])].sort((a,b)=>a.page-b.page);
+  const facts=[...(project.appearances||[]).map(a=>({...a,manual:false,evidencePage:a.page,owner:{appearanceId:a.id} as AppearanceEndpoint})),...(project.appearanceFacts||[])].sort((a,b)=>a.page-b.page||Number(!!a.manual)-Number(!!b.manual));
   for(const a of facts){
     const person=project.characters.find(c=>c.id===resolve(a.owner));
     if(!person)continue;
@@ -90,18 +93,19 @@ export function rebuildAppearanceEvidence(project:Project){
         const target=f.target?resolve(f.target):undefined;
         return f.target&&(!target||target===person.id)?[]:[{...f,target:target||null,appearanceId:a.owner.appearanceId}];
       });
-      applyCharacterFacts(person,section,updates,a.page);
+      if(a.manual)for(const update of updates)applyCorrectionValue(project,{kind:'fact',personId:person.id,section,action:update.action,fact:{...update,target:update.target||undefined,sincePage:a.evidencePage||a.page}});
+      else applyCharacterFacts(person,section,updates,a.page);
     }
   }
   project.relations=structuredClone(project.identityBaseline.relations);
   for(const event of project.appearanceRelations||[]){
     const source=resolve(event.source),target=resolve(event.target);
     if(!source||!target||source===target)continue;
-    const relation={source,target,kind:event.kind,label:event.label,directed:event.directed,evidence:event.evidence,sincePage:event.page,sourceAppearanceId:event.source.appearanceId,targetAppearanceId:event.target.appearanceId};
+    const relation={source,target,kind:event.kind,label:event.label,directed:event.directed,evidence:event.manual?`人工校正：${event.evidence}`:event.evidence,sincePage:event.evidencePage||event.page,sourceAppearanceId:event.source.appearanceId,targetAppearanceId:event.target.appearanceId};
     const index=project.relations.findIndex(r=>relationKey(r)===relationKey(relation));
     if(event.action==='remove'){if(index>=0)project.relations.splice(index,1);}
     else if(index<0)project.relations.push(relation);
-    else if(project.relations[index].label.trim()!==relation.label.trim())project.relations[index]=relation;
+    else if(event.manual||project.relations[index].label.trim()!==relation.label.trim())project.relations[index]=relation;
   }
   for(const correction of project.corrections||[])applyCorrectionValue(project,correction);
   refreshAppearanceReferences(project);

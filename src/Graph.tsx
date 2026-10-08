@@ -1,3 +1,4 @@
+import { savedGraphPositions, saveGraphPositions } from './view-preferences';
 import { useEffect, useMemo, useState } from 'react';
 import { ReactFlow, Background, Controls, Handle, Position, MarkerType, BaseEdge, EdgeLabelRenderer, Panel, useNodesState, useReactFlow, useNodesInitialized, useStore, getBezierPath, type NodeProps, type Node, type Edge, type EdgeProps } from '@xyflow/react';
 import { LayoutGrid } from 'lucide-react';
@@ -48,7 +49,8 @@ export default function Graph({stage,selectedPerson,selectedGroup,onSelect,onSel
   // Polling and avatar edits should not reset the user's dragged positions.
   const topology=JSON.stringify([stage.characters.map(p=>p.id),groups.map(g=>[g.id,g.source,g.target])]);
   const layout=useMemo(()=>layoutGraph(stage.characters,groups),[topology]);
-  const initial=useMemo<PersonNode[]>(()=>stage.characters.map(person=>({id:person.id,type:'person',position:layout.positions.get(person.id)!,width:CARD_WIDTH,height:CARD_HEIGHT,data:{person,active:false,dimmed:false,connections:0,statuses:[],onSelect}})),[layout,onSelect]);
+  const saved=useMemo(()=>savedGraphPositions(stage.id),[stage.id,layout]);
+  const initial=useMemo<PersonNode[]>(()=>stage.characters.map(person=>({id:person.id,type:'person',position:saved[person.id]||layout.positions.get(person.id)!,width:CARD_WIDTH,height:CARD_HEIGHT,data:{person,active:false,dimmed:false,connections:0,statuses:[],onSelect}})),[layout,onSelect,saved]);
   const [nodes,setNodes,onNodesChange]=useNodesState(initial);
   const [reset,setReset]=useState(0);
   useEffect(()=>{setNodes(initial);},[initial,setNodes]);
@@ -69,8 +71,8 @@ export default function Graph({stage,selectedPerson,selectedGroup,onSelect,onSel
       style:{stroke:color,strokeWidth:active?2:1.4,opacity:dimmed?.2:1,strokeLinejoin:'round'},
       data:{points:route.points,labelPoint:route.label,sourceAnchor:{x:source.x+CARD_WIDTH/2,y:source.y+CARD_HEIGHT},targetAnchor:{x:target.x+CARD_WIDTH/2,y:target.y},count:group.relations.length,active,dimmed,fullLabel:group.relations.map(r=>r.label).join(' / '),onSelect:()=>onSelectGroup(group.id)}}];
   });
-  return <ReactFlow nodes={visibleNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={onNodesChange} fitView fitViewOptions={{padding:.25,maxZoom:1.1}} minZoom={.15} maxZoom={2} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null} proOptions={{hideAttribution:true}}>
+  return <ReactFlow nodes={visibleNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={onNodesChange} onNodeDragStop={(_,node)=>saveGraphPositions(stage.id,visibleNodes.map(n=>n.id===node.id?{...n,position:node.position}:n))} fitView fitViewOptions={{padding:.25,maxZoom:1.1}} minZoom={.15} maxZoom={2} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null} proOptions={{hideAttribution:true}}>
     <Background gap={24} size={1} color="#dfe4dd"/><Controls showInteractive={false}/>
-    <LayoutTools revision={`${topology}-${reset}`} onReset={()=>{setNodes(initial);setReset(n=>n+1);}}/>
+    <LayoutTools revision={`${topology}-${reset}`} onReset={()=>{const arranged=initial.map(n=>({...n,position:layout.positions.get(n.id)!}));setNodes(arranged);saveGraphPositions(stage.id,arranged);setReset(n=>n+1);}}/>
   </ReactFlow>;
 }

@@ -1,3 +1,5 @@
+import { refreshCastEvidence } from './cast-evidence.js';
+import { beginAppearanceLedger, rebuildAppearanceEvidence } from './appearances.js';
 import { identityPeople } from '../shared/identity-people.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -9,23 +11,46 @@ import { visibleCast, visibleRelations } from './identity-state.js';
 const text=z.string().trim().min(1).max(2000);
 const fact=z.object({key:text,label:text,value:text,certainty:z.enum(['confirmed','uncertain']),evidence:text,sincePage:z.number().int().positive(),target:z.string().optional()});
 const relation=z.object({source:text,target:text,kind:text,label:text,directed:z.boolean(),evidence:text,sincePage:z.number().int().positive()});
+const scope=z.enum(['once','fixed']).default('fixed');
 export const correctionSchema=z.discriminatedUnion('kind',[
-  z.object({kind:z.literal('character'),personId:text,name:text,aliases:z.array(text),description:z.string().max(2000),appearance:z.string().max(1000),nameType:z.enum(['named','descriptive'])}),
-  z.object({kind:z.literal('fact'),personId:text,section:z.enum(['profile','status']),action:z.enum(['upsert','remove']),fact}),
-  z.object({kind:z.literal('relation'),action:z.enum(['upsert','remove']),relation}),
+  z.object({scope,kind:z.literal('character'),personId:text,name:text,aliases:z.array(text),description:z.string().max(2000),appearance:z.string().max(1000),nameType:z.enum(['named','descriptive'])}),
+  z.object({scope,kind:z.literal('fact'),personId:text,section:z.enum(['profile','status']),action:z.enum(['upsert','remove']),fact}),
+  z.object({scope,kind:z.literal('relation'),action:z.enum(['upsert','remove']),relation}),
 ]);
 export const correctionKey=(c:CorrectionInput)=>c.kind==='character'?`person:${c.personId}`:c.kind==='fact'?`fact:${c.personId}:${c.section}:${factKey(c.fact)}`:`relation:${relationKey(c.relation)}`;
 
 export function correctProject(project:Project,input:CorrectionInput){
+  const draft=structuredClone(project);
+  correctInto(draft,correctionSchema.parse(input));
+  Object.assign(project,draft);
+}
+function correctInto(project:Project,input:CorrectionInput){
   if(!project.processed)throw new Error('请先分析页面，再校正已识别的人物。');
   const known=new Set(identityPeople(project).map(c=>c.id));
   if(input.kind==='relation'){
     if(!known.has(input.relation.source)||!known.has(input.relation.target)||input.relation.source===input.relation.target)throw new Error('关系两端必须是不同的现有人物。');
   }else if(!known.has(input.personId)||(input.kind==='fact'&&input.fact.target&&(!known.has(input.fact.target)||input.fact.target===input.personId)))throw new Error('人物或状态目标无效。');
   if(input.kind==='fact'&&input.fact.sincePage>project.processed||input.kind==='relation'&&input.relation.sincePage>project.processed)throw new Error('证据页不能超过已读范围。');
+  if(input.scope==='once'){
+    if(project.corrections?.some(c=>correctionKey(c)===correctionKey(input)))throw new Error('此项已有持续固定，请先解除固定，再进行本次校正。');
+    beginAppearanceLedger(project);
+    const meta={manual:true,page:project.processed,pageId:project.pages[project.processed-1].id};
+    if(input.kind==='fact'){
+      const {target,...fact}=input.fact;
+      const update={...fact,action:input.action,target:target?{characterId:target}:undefined};
+      project.appearanceFacts!.push({...meta,evidencePage:fact.sincePage,owner:{characterId:input.personId},profileUpdates:input.section==='profile'?[update]:[],statusChanges:input.section==='status'?[update]:[]});
+    }else if(input.kind==='relation'){
+      const {source,target,sincePage,...relation}=input.relation;
+      project.appearanceRelations!.push({...meta,...relation,evidencePage:sincePage,source:{characterId:source},target:{characterId:target},action:input.action});
+    }else applyCorrectionValue(project,input);
+    rebuildAppearanceEvidence(project);
+    project.canUndoMerge=false;
+    return;
+  }
   const c:ManualCorrection={...structuredClone(input),id:randomUUID(),page:project.processed};
   project.corrections=[...(project.corrections||[]).filter(old=>correctionKey(old)!==correctionKey(c)),c];
   applyCorrectionValue(project,c);
+  refreshCastEvidence(project);
   const stage=project.stages.at(-1);
   if(stage){stage.characters=structuredClone(visibleCast(project));stage.relations=structuredClone(visibleRelations(project));}
   project.canUndoMerge=false;
@@ -38,7 +63,7 @@ export function applyCorrectionValue(project:Project,c:CorrectionInput){
   }else if(c.kind==='fact'){
     const person=identityPeople(project).find(p=>p.id===c.personId)!;
     if(c.action==='upsert'){const field=c.section==='profile'?'profile':'statuses';person[field]=person[field]?.filter(f=>factKey(f)!==factKey(c.fact));}
-    applyCharacterFacts(person,c.section,[{...c.fact,action:c.action,evidence:`人工校正：${c.fact.evidence}`}],c.fact.sincePage);
+    applyCharacterFacts(person,c.section,[{...c.fact,certainty:c.action==='remove'?'confirmed':c.fact.certainty,action:c.action,evidence:`人工校正：${c.fact.evidence}`}],c.fact.sincePage);
   }else{
     const index=project.relations.findIndex(r=>relationKey(r)===relationKey(c.relation));
     if(c.action==='remove'){if(index>=0)project.relations.splice(index,1);}
@@ -65,4 +90,16 @@ export function mergeCorrections(project:Project,source:string,target:string){
   const mapped=(project.corrections||[]).map(c=>c.kind==='relation'?{...c,relation:{...c.relation,source:resolve(c.relation.source),target:resolve(c.relation.target)}}:c.kind==='fact'?{...c,personId:resolve(c.personId),fact:{...c.fact,...(c.fact.target?{target:resolve(c.fact.target)}:{})}}:{...c,personId:resolve(c.personId)}).filter(c=>c.kind==='relation'?c.relation.source!==c.relation.target:c.kind==='fact'?c.personId!==c.fact.target:true);
   if(new Set(mapped.map(correctionKey)).size!==mapped.length)throw new Error('两个人物有冲突的人工固定项，请先解除相关固定再合并。');
   return mapped;
+}
+
+
+export function unlockCorrection(project:Project,id:string){
+  if(!project.corrections?.some(c=>c.id===id))throw new Error('该固定项已不存在，请刷新后重试。');
+  const draft=structuredClone(project);
+  draft.corrections=draft.corrections!.filter(c=>c.id!==id);
+  // No API request: replay retained page evidence and reapply remaining locks.
+  // Older projects without a ledger keep their last known values until reread.
+  rebuildAppearanceEvidence(draft);
+  draft.canUndoMerge=false;
+  Object.assign(project,draft);
 }

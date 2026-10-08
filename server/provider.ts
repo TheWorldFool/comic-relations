@@ -1,3 +1,4 @@
+import type { ReadingPhase } from '../shared/types.js';
 import { identityView } from '../shared/identity-people.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -41,7 +42,7 @@ class ModelTruncationError extends Error {
 const numeric=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)?value:undefined;
 export type TokenUsage = { promptTokens?:number; completionTokens?:number; reasoningTokens?:number };
 // Accumulated over the attempts of one page read; elapsed time is measured by the caller.
-export type PageMetrics = { identityReviewMs?:number; identityReviewResult?:IdentityReviewResult; identityReviewRequests?:number; attempts:number; promptTokens:number; completionTokens:number; reasoningTokens:number; preparationMs?:number; modelMs?:number; contextCharacters?:number; imageCount?:number; model?:string; endpointOrigin?:string; promptHash?:string; reasoningEffort?:string; maxTokens?:number };
+export type PageMetrics = { onPhase?:(phase:ReadingPhase)=>void; identityReviewMs?:number; identityReviewResult?:IdentityReviewResult; identityReviewRequests?:number; attempts:number; promptTokens:number; completionTokens:number; reasoningTokens:number; preparationMs?:number; modelMs?:number; contextCharacters?:number; imageCount?:number; model?:string; endpointOrigin?:string; promptHash?:string; reasoningEffort?:string; maxTokens?:number };
 export async function completion(messages: unknown[], signal: AbortSignal, recoverTruncation=false, onAdjustment?:(adjustments:string[])=>void, onUsage?:(usage:TokenUsage)=>void, onRequest?:(model:string,origin:string,options:ReturnType<typeof readingOptions>)=>void, purpose:'reading'|'identity-review'='reading') {
   const c = await config();
   if (!c.apiKey) throw new Error('请先在阅读设置中填写 DeepSeek API Key。');
@@ -99,6 +100,7 @@ export async function auditIdentity(project:Project,personId:string,signal:Abort
 }
 async function readPreparedPage(project: Project, signal: AbortSignal, images: ReadingImages, metrics?: PageMetrics): Promise<Reading> {
   const page = project.pages[project.processed];
+  metrics?.onPhase?.('preparing');
   const prepareStarted = Date.now();
   const context = readingContext(project);
   const protocol = readingProtocol(context.memoryInstruction);
@@ -146,6 +148,7 @@ async function readPreparedPage(project: Project, signal: AbortSignal, images: R
   // One correction request at most; never skip the page or replace missing story data.
   for (let attempt = 0; attempt < 2; attempt++) {
     signal.throwIfAborted();
+    metrics?.onPhase?.(attempt?'repairing':'reading');
 
     let output: unknown;
     let detail = '';
@@ -183,6 +186,7 @@ async function readPreparedPage(project: Project, signal: AbortSignal, images: R
         }
         const reading:Reading=checked.data;
         if(reading.kind==='story'||page.override==='story'){
+          metrics?.onPhase?.('identity');
           reading.identityReview=await reviewIdentities(project,reading,images,signal,async reviewMessages=>{
             const started=Date.now();
             if(metrics){

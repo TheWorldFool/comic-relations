@@ -7,8 +7,10 @@ import { applyReading, resetAnalysis, type Reading } from '../server/analysis.js
 import { bindAppearances, rebuildAppearanceEvidence } from '../server/appearances.js';
 import { mergeCharacters } from '../server/identity.js';
 import { confirmIdentity } from '../server/identity-state.js';
-import { correctProject } from '../server/corrections.js';
+import { correctProject, unlockCorrection } from '../server/corrections.js';
 import { readingContext } from '../server/reading-request.js';
+import { identitySubjects } from '../server/identity-review.js';
+import { referenceCharacters } from '../server/reading-request.js';
 import AppearanceManager from '../src/AppearanceManager.js';
 
 const person=(id:string)=>({id,name:id,aliases:[],description:'已知人物',appearance:`${id} 的稳定标志`,nameType:'named' as const,avatarBox:{x:.1,y:.1,width:.2,height:.2}});
@@ -114,4 +116,71 @@ test('只移动画面出场，不会悄悄丢弃该临时身份另外被提及�
   applyReading(p,reading({characters:[{...person('u'),presence:'mentioned',statusChanges:[fact('去向未明')]}],identityReview:[]}));
   bindAppearances(p,[p.appearances!.find(a=>a.trackId==='u')!.id],'a','只确认这次画面');
   assert.equal(p.pendingIdentities?.find(c=>c.id==='u')?.statuses?.[0].value,'去向未明');
+});
+
+
+test('人工固定期间完整保留模型状态、档案和关系证据；解除固定本地重算且保留其他固定项与历史阶段',()=>{
+  const p=project();
+  applyReading(p,reading({characters:[{...person('a'),statusChanges:[fact('原状态')]},person('b')],identityReview:[decision('a'),decision('b')],relationChanges:[relation('a','b')]}));
+  correctProject(p,{kind:'fact',personId:'a',section:'status',action:'upsert',fact:{...fact('固定状态'),target:undefined,sincePage:1}});
+  correctProject(p,{kind:'fact',personId:'a',section:'profile',action:'upsert',fact:{key:'job',label:'职业',value:'人工职业',certainty:'confirmed',evidence:'人工依据',sincePage:1}});
+  correctProject(p,{kind:'relation',action:'upsert',relation:{...relation('a','b'),label:'固定关系',sincePage:1}});
+  correctProject(p,{kind:'character',personId:'a',name:'人工姓名',aliases:[],appearance:'人工外观',description:'人工描述',nameType:'named'});
+  const update=reading({characters:[{...person('a'),statusChanges:[fact('新的健康证据')],profileUpdates:[{...fact('新职业证据'),key:'job',label:'职业'}]},person('b')],identityReview:[],relationChanges:[relation('a','b','remove')]});
+  applyReading(p,update);
+  const observed=p.appearances!.find(a=>a.page===2&&a.trackId==='a')!;
+  assert.equal(observed.observed.name,'a','人工显示姓名不覆盖本页模型观察');
+  assert.equal(observed.statusChanges[0].value,'新的健康证据');assert.equal(observed.profileUpdates[0].value,'新职业证据');
+  assert.equal(p.appearanceRelations!.at(-1)!.action,'remove');
+  assert.equal(p.characters[0].statuses![0].value,'固定状态');assert.equal(p.characters[0].profile![0].value,'人工职业');assert.equal(p.relations[0].label,'固定关系');
+  applyReading(p,reading({characters:[{...person('b'),statusChanges:[fact('重大状态')]}],turningPoint:{title:'变化',reason:'状态重大变化',confidence:1},identityReview:[]}));
+  const history=JSON.stringify(p.stages[0]),evidence=JSON.stringify([p.appearances,p.appearanceRelations]);
+  const health=p.corrections!.find(c=>c.kind==='fact'&&c.section==='status')!;
+  unlockCorrection(p,health.id);
+  assert.equal(p.characters[0].statuses![0].value,'新的健康证据');assert.equal(p.characters[0].profile![0].value,'人工职业');assert.equal(p.characters[0].name,'人工姓名');
+  assert.equal(p.relations[0].label,'固定关系');assert.equal(JSON.stringify(p.stages[0]),history);assert.equal(p.processed,3);
+  unlockCorrection(p,p.corrections!.find(c=>c.kind==='relation')!.id);assert.equal(p.relations.length,0);
+  unlockCorrection(p,p.corrections!.find(c=>c.kind==='fact')!.id);assert.equal(p.characters[0].profile![0].value,'新职业证据');
+  assert.equal(JSON.stringify([p.appearances,p.appearanceRelations]),evidence,'解锁不改原证据');
+  const before=JSON.stringify(p);assert.throws(()=>unlockCorrection(p,'absent'));assert.equal(JSON.stringify(p),before);
+});
+
+test('撤走全部出场后隐藏当前节点但保留档案，初登场随归属前移、后移及恢复',()=>{
+  const p=project();
+  applyReading(p,reading({characters:[person('a')],identityReview:[decision('a')]}));
+  applyReading(p,reading({characters:[person('b')],identityReview:[decision('b')]}));
+  applyReading(p,reading({characters:[person('a')],identityReview:[]}));
+  const first=p.appearances![0],last=p.appearances![2];
+  bindAppearances(p,[first.id],'b','第一张其实是 b');
+  assert.equal(p.characters.find(c=>c.id==='b')!.firstPage,1);assert.equal(p.characters.find(c=>c.id==='a')!.firstPage,3);
+  bindAppearances(p,[last.id],'b','第三张也是 b');
+  assert.equal(p.characters.length,2);assert.equal(p.characters.find(c=>c.id==='a')!.archived,true);
+  assert.deepEqual(p.stages.at(-1)!.characters.map(c=>c.id),['b']);assert.ok(!referenceCharacters(p).some(c=>c.id==='a'));
+  assert.equal(identitySubjects(p,reading({characters:[person('a')]})).length,1,'重新识别无依据档案必须复核');
+  bindAppearances(p,[first.id],'a','恢复第一张判断');
+  assert.equal(p.characters.find(c=>c.id==='a')!.archived,undefined);assert.equal(p.characters.find(c=>c.id==='a')!.firstPage,1);assert.equal(p.characters.find(c=>c.id==='b')!.firstPage,2);
+  assert.equal(p.stages.at(-1)!.characters.length,2);
+});
+
+test('独立文本证据、人工固定与旧基线保护有依据档案，不以当前缺席或缺少新裁图隐藏人物',()=>{
+  const p=project();
+  applyReading(p,reading({characters:[person('a'),person('b')],identityReview:[decision('a'),decision('b')]}));
+  applyReading(p,reading({characters:[{...person('a'),presence:'mentioned',statusChanges:[fact('独立文本证据')]}],identityReview:[]}));
+  bindAppearances(p,[p.appearances![0].id],'b','只校正画面');assert.equal(p.characters.find(c=>c.id==='a')!.archived,undefined);
+  const q=project();q.processed=1;q.characters=[{...person('old'),firstPage:1}];
+  applyReading(q,reading({characters:[person('new')],identityReview:[decision('new')]}));
+  bindAppearances(q,[q.appearances![0].id],'old','确认同一人');assert.equal(q.characters.find(c=>c.id==='old')!.firstPage,1);assert.equal(q.characters.find(c=>c.id==='old')!.archived,undefined);
+  assert.equal(q.characters.find(c=>c.id==='new')!.archived,true);
+  correctProject(q,{kind:'character',personId:'new',name:'人工确认独立',aliases:[],description:'另有明确证据',appearance:'标志',nameType:'named'});
+  assert.equal(q.characters.find(c=>c.id==='new')!.archived,undefined);assert.ok(q.stages.at(-1)!.characters.some(c=>c.id==='new'));
+  const r=project();applyReading(r,reading({characters:[person('a')],identityReview:[decision('a')]}));applyReading(r,reading());
+  assert.equal(r.characters[0].archived,undefined,'普通缺席不撤销历史出场证据');
+});
+
+test('固定期间的新证据仍须校验，损坏引用不能藏在锁定项下写入账本',()=>{
+  const p=project();applyReading(p,reading({characters:[person('a')],identityReview:[decision('a')]}));
+  correctProject(p,{kind:'fact',personId:'a',section:'status',action:'upsert',fact:{...fact('固定状态'),target:undefined,sincePage:1}});
+  const before=JSON.stringify(p);
+  assert.throws(()=>applyReading(p,reading({characters:[{...person('a'),statusChanges:[fact('重复一'),fact('重复二')]}],identityReview:[]})),/重复/);
+  assert.equal(JSON.stringify(p),before);
 });

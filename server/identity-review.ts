@@ -55,7 +55,7 @@ export function identitySubjects(project:Project,reading:Reading,mode:'reading'|
     if(person.presence==='mentioned')return false;
     if(mode==='archive')return true;
     const id=canonicalId(project,person.id),old=project.characters.find(c=>c.id===id);
-    if(!old)return true;
+    if(!old||old.archived)return true;
     const names=[old.name,...old.aliases].map(n=>n.trim().toLocaleLowerCase());
     const renamed=person.nameType==='named'&&!names.includes(person.name.trim().toLocaleLowerCase());
     if(renamed||person.identityConcern?.trim()||person.sameAs&&canonicalId(project,person.sameAs.id)!==id)return true;
@@ -141,7 +141,7 @@ export function validateIdentityDecisions(project:Project,subjects:Reading['char
   return decisions;
 }
 
-function compactPerson(c:Character){return {id:c.id,name:c.name,aliases:c.aliases,appearance:c.appearance,description:c.description,identityState:c.identityState||'confirmed',identityCandidates:c.identityCandidates};}
+function compactPerson(c:Character){return {id:c.id,name:c.name,aliases:c.aliases,appearance:c.appearance,description:c.description,identityState:c.identityState||'confirmed',archived:c.archived,identityCandidates:c.identityCandidates};}
 export async function reviewIdentities(project:Project,reading:Reading,images:ReadingImages,signal:AbortSignal,request:(messages:unknown[])=>Promise<unknown>,mode:'reading'|'archive'='reading',report?:(result:IdentityReviewResult)=>void):Promise<IdentityDecision[]>{
   project=identityView(project);
   const subjects=identitySubjects(project,reading,mode);

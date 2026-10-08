@@ -54,7 +54,7 @@ DeepSeek is the default integration. Custom providers must support the image and
 3. **Review background.** Optionally search for the original work, inspect the sources, and adopt the result. Background research can be skipped.
 4. **Analyze.** Read story pages in order to extract characters, events, states, and relationships. Review errors and resume from the saved position.
 5. **Explore.** Switch between **阅读对照** (Reading comparison) and **关系工作台** (Relationship workspace). **独立打开关系图** opens an independent tab. Select a stage, inspect a character or relationship, and follow page references back to the comic.
-6. **Correct and export.** Merge duplicate characters, crop replacement portraits, or export the project analysis as JSON.
+6. **Correct and export.** Review unresolved items, correct individual appearances or box a missed character on an analyzed story page, and add missing relationships or states. Apply a one-time correction or an explicit persistent lock, then export the analysis as JSON.
 
 Changing the order, role, or reading direction of already-read pages invalidates the analysis and requires a reset and reread; the UI asks first. Removing a page that has not been read yet keeps the completed analysis. Original source files are not modified.
 

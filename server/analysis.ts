@@ -35,6 +35,7 @@ confidence 仅表示页面用途判定的把握，不是角色命名或剧情细
 复用人物档案 id，用发型、衣着、脸部和上下文辨认；匿名人物用描述性名字，后续真名更新同一个 id。本页实际出场的人物都应返回，即使没有档案变化，尤其不要省略待定人物；仅资料有变化的旧人物也可返回。不能因为某人只有封面参考、没有真名或与已知人物相似就省略正文中的实际出场。avatarBox 是当前整页原图中可辨认头部或全身参考区域的归一化 x/y/width/height（0~1），不确定则 null，不要框对白。
 人物身份优先于姓名：每次建档前，逐一对照已有 appearance、别名、参考头像及前页人物。换衣服、换角度、首次被叫真名都不自动建立新人物。appearance 记录稳定的脸部/标志及可区分其他人的特征；当前衣着和临时发型分别放可选字段 outfit、hairStyle，没有清晰证据则省略，不用换装覆盖稳定外貌。系统会把本页观察保存为独立出场记录，不能确定归属时允许待定；nameType=named 表示有证据的专名，descriptive 表示“短发女子”等临时外观称呼。临时称呼后来被确认真名时，沿用原 id，真名填 name，旧称呼保留 aliases，不返回第二个人物。
 若输出 id 与既有档案不同但有具体证据是同一人，填写 sameAs:{id:既有人物id,confidence:0到1,evidence:视觉连续性或明确称呼指向的依据}。仅姓名相似、同色头发、同原作阵营不够；没有证据则 sameAs:null，存疑时给低置信度留待核对，不武断合并。必须遵循 identityRedirects 中用户已确认的归并，后续用最终 id。
+archived=true 表示该档案在出场校正后暂无当前依据，不等于死亡或剧情退场；再次对应到画面时需要重新核对，不能仅凭旧摘要沿用其身份。
 人物可有 identityState=pending，这是待定出场记录，不是已经确认的新人物。后续再次出现先沿用其 id；发现更可靠归属时用 sameAs 指向候选。不能为了避开待定结论而另建 id。identityConcern 可说明现有身份的疑点，没有则省略。referenceView 标注本次头像框的角度 front/profile/body/other；清楚的侧脸或全身也可作为辨认参考，不必强求正脸。结合连续动作、空间位置、对白实际说话者和称呼对象判断同一人；同色头发、相同制服、姓名相近只能筛选候选，不能直接证明身份。镜像、闪回、变身、伪装与夸张画风需结合具体叙事证据。
 区分出场与提及：presence=visible 表示当前画面实际出现的人物；仅对白提及、引用、幻想中的名字且无法对应画面人物时，不为每个名字建立角色，写到顶层 mentions:[{name,evidence}] 即可，不将这些未建档提及作为关系端点。称呼可能指第三人，不要把对白附近的人自动命名为该姓名。未命名出场人物可有自己的临时档案。
 appearanceCorrections 是针对具体页出场的归属校正，优先于旧摘要中该页的错误称呼；只适用于列出的出场，不代表两个角色是同一人。recentAppearances 保留最近的出场观察，referenceApproved=false 的图片或外观只是待核对线索，不能当作已确认身份参考。
@@ -93,7 +94,13 @@ function applyReadingInto(project: Project, reading: Reading, avatars: Record<st
   }
   project.characters=identityPeople(project);project.pendingIdentities=[];
   const identities=kind==='story'?resolveIdentities(project,reading):null;
-  if(identities)reading=respectCorrections(project,identities.reading);
+  // Store normalized model evidence before applying manual display constraints.
+  // Fixed facts override the projection, never erase newly observed evidence.
+  const evidenceReading=identities?structuredClone(identities.reading):reading;
+  if(identities){
+    validateReferences(project,evidenceReading);
+    reading=respectCorrections(project,identities.reading);
+  }
   if(kind==='story'){
     validateReferences(project,reading);
     const issue=memoryIssue(project,reading);if(issue)throw new Error(issue);
@@ -137,7 +144,7 @@ function applyReadingInto(project: Project, reading: Reading, avatars: Record<st
         if(visible)changes.push(`${name(change.source)} → ${name(change.target)}：${old ? `${old.label} → ` : ''}${change.label}`);
       }
     }
-    recordAppearancePage(project,reading,avatars);
+    recordAppearancePage(project,evidenceReading,avatars);
     applyMemory(project, reading, pageNumber);
     if(identities){
       project.identityRedirects={...project.identityRedirects,...identities.redirects};
