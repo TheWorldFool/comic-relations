@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { applyReading, type Reading } from '../server/analysis.js';
-import { identityCandidates, identitySubjects, validateIdentityDecisions, reviewIdentities } from '../server/identity-review.js';
+import { identityCandidates, identitySubjects, validateIdentityDecisions, reviewIdentities, identityReviewContext } from '../server/identity-review.js';
 import { resolveIdentities } from '../server/identity.js';
 import { addReference, confirmIdentity } from '../server/identity-state.js';
 import { ReadingImages } from '../server/reading-images.js';
@@ -17,6 +17,41 @@ const person=(id:string,name=id)=>({id,name,aliases:[],description:'人物',appe
 const pageReading=(input:Partial<Reading>={}):Reading=>({kind:'story',confidence:1,reason:'正文',summary:'连续动作',storyTime:'',memory:'本页事件',memoryMode:'delta',threadChanges:[],turningPoint:null,characters:[],relationChanges:[],...input});
 const project=():Project=>({id:'00000000-0000-0000-0000-000000000001',name:'test',createdAt:'',updatedAt:'',status:'idle',direction:'ltr',processed:0,memory:'',characters:[],relations:[],stages:[],pages:Array.from({length:8},(_,i)=>({id:`p${i}`,name:`${i}`,width:100,height:100,image:'',thumbnail:'',override:'story'}))});
 const decision=(id:string,state:IdentityDecision['decision'],target:string|null=null):IdentityDecision=>({id,decision:state,target,candidates:[],conflicts:[],evidence:state==='match'?[{kind:'visual',text:'左眼痣和耳饰对应'},{kind:'continuity',text:'推门动作接续'}]:state==='new'?[{kind:'distinct',text:'与已有角色面对面对话，面部特征不同'}]:[]});
+
+test('复核共享历史场景可完整还原每人的历史；保留疑点、校正、旧人及变化，不带入未来页',()=>{
+  const p=project(),subjects=Array.from({length:6},(_,i)=>({...person(`c${i}`),identityConcern:`核对人物 ${i}`,statusChanges:[{action:'upsert' as const,key:'appearance',label:'外观',value:'换装',certainty:'confirmed' as const,target:null,evidence:'换装但保留耳饰'}]}));
+  for(let i=0;i<3;i++)applyReading(p,pageReading({summary:`已读场景${i}：${'多个角色交换线索并核对不同身份。'.repeat(60)}`,characters:subjects}));
+  p.pages[6].analysis={kind:'story',summary:'不应读取的未来情节',confidence:1,reason:'',storyTime:''};
+  p.workContext={originalWork:'测试作品',background:'身份背景',characterGuide:'人物设定'};
+  p.corrections=[{id:'fixed',page:2,kind:'character',personId:'c0',name:'人工确认姓名',aliases:[],appearance:'耳饰',description:'已核对',nameType:'named'}];
+  const before=JSON.stringify(p),context=identityReviewContext(p,subjects,'reading');
+  assert.equal(context.cast.length,6);assert.equal(context.scenes.length,3);
+  for(const subject of context.subjects){
+    assert.deepEqual({storyAppearances:subject.storyAppearances,recentAppearances:subject.recentAppearances.map(a=>({...a,summary:context.scenes.find(s=>s.page===a.page)?.summary}))},identityHistory(p,subject.id));
+    assert.deepEqual(subject.statusChanges,subjects[0].statusChanges);
+  }
+  assert.deepEqual(context.manualCorrections,p.corrections);assert.deepEqual(context.workContext,p.workContext);
+  assert.deepEqual(context.recentScenePages,[1,2,3]);assert.ok(!JSON.stringify(context).includes('不应读取的未来情节'));
+  const {scenes,recentScenePages,...rest}=context;
+  const repeated={...rest,subjects:subjects.map(s=>({...s,...identityHistory(p,s.id)})),recentScenes:scenes.filter(s=>recentScenePages.includes(s.page))};
+  assert.ok(JSON.stringify(context).length<JSON.stringify(repeated).length*.65,'共享场景应显著减少多人重复的相同梗概');
+  assert.equal(JSON.stringify(p),before);
+});
+
+test('同页人物复核保留全部档案标签，但重复的初登场参考图只发送一次',async()=>{
+  const p=project();applyReading(p,pageReading({characters:[person('a'),person('b')]}));
+  const images=new ReadingImages(p.id,new AbortController().signal,async(file,variant)=>`data:image/jpeg;base64,${Buffer.from(file+variant).toString('base64')}`);
+  try{
+    let content:{type:string;text?:string}[]=[];
+    await reviewIdentities(p,pageReading({characters:[{...person('a'),identityConcern:'外貌存疑'}]}),images,new AbortController().signal,async messages=>{
+      content=(messages[1] as {content:typeof content}).content;
+      return {decisions:[decision('a','pending')]};
+    });
+    assert.equal(content.filter(c=>c.type==='image_url').length,2,'当前页和上一页，两个人物的首次出场页复用上一页');
+    const text=content.map(c=>c.text||'').join('\n');
+    assert.match(text,/a 初次出场/);assert.match(text,/b 初次出场/);assert.match(text,/复用该图/);
+  }finally{images.close();}
+});
 
 test('换装和新名字经复核沿用身份；单一相似依据、反证与循环匹配不会强行归并',()=>{
   const p=project();applyReading(p,pageReading({characters:[person('a')]}));

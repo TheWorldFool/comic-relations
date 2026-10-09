@@ -1,4 +1,7 @@
-import { readingSchema } from './analysis.js';
+import { readingSchema, type InheritedCharacterField } from './analysis.js';
+import { identityPeople } from '../shared/identity-people.js';
+import type { Project } from '../shared/types.js';
+import { canonicalId } from './identity.js';
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -9,15 +12,29 @@ function numberString(value: unknown): unknown {
   return value;
 }
 
-export function parseReadingOutput(input: unknown) {
+export function parseReadingOutput(input: unknown, project?:Project) {
   const output = structuredClone(input);
   const adjustments: string[] = [];
+  const inheritedCharacterFields:Record<string,InheritedCharacterField[]>=Object.create(null);
+  const known=new Map(project?identityPeople(project).filter(p=>p.firstPage<=project.processed).map(p=>[p.id,p]):[]);
   if (record(output)) {
     output.confidence = numberString(output.confidence);
     if (output.storyTime == null) { output.storyTime = ''; adjustments.push('storyTime: 未提供时间'); }
     if (Array.isArray(output.characters)) {
       output.characters.forEach((person, i) => {
         if (!record(person)) return;
+        // Only a known ID (or an already approved redirect) can inherit a stored
+        // field. Never infer an identity from a name, sameAs proposal or a peer
+        // created elsewhere in this response. Explicit invalid values still fail.
+        const old=project&&typeof person.id==='string'?known.get(canonicalId(project,person.id)):undefined;
+        if(old){
+          const inherited:InheritedCharacterField[]=[];
+          for(const field of ['name','aliases','description','nameType'] as const){
+            if(field==='nameType'&&person.name!==old.name)continue;
+            if(!Object.hasOwn(person,field)&&old[field]!==undefined){person[field]=structuredClone(old[field]);inherited.push(field);}
+          }
+          if(inherited.length)inheritedCharacterFields[person.id as string]=inherited;
+        }
         if (person.aliases == null) { person.aliases = []; adjustments.push(`characters.${i}.aliases: 无别名`); }
         if (record(person.avatarBox)) {
           for (const key of ['x','y','width','height']) person.avatarBox[key] = numberString(person.avatarBox[key]);
@@ -35,7 +52,7 @@ export function parseReadingOutput(input: unknown) {
     }
   }
   const parsed = readingSchema.safeParse(output);
-  return { parsed, adjustments };
+  return { parsed, adjustments, inheritedCharacterFields };
 }
 
 export function describeReadingIssues(issues: {path: PropertyKey[]; message:string}[]) {

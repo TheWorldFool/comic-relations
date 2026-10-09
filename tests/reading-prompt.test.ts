@@ -31,3 +31,12 @@ test('汇总指令要求旧摘要、全部待汇总事件和本页事件，保�
   assert.match(system,/不能因本页未提及而删除线索/);
   assert.match(system,/只使用已读信息/);
 });
+
+test('传输协议允许旧人物简写，提交协议仍要求完整档案并明确要求新人资料',()=>{
+  const protocol=readingProtocol('delta');
+  const example=JSON.parse(protocol.system.split('本次输出格式示例（占位文字不可作为剧情事实）：\n')[1].split('\n')[0]);
+  const compact={...example,characters:[{id:'known',presence:'visible',avatarBox:null}]};
+  assert.equal(protocol.outputSchema.safeParse(compact).success,true);
+  assert.equal(protocol.schema.safeParse(compact).success,false,'必须先由系统核对 ID 并补全，不能直接提交缺失档案');
+  for(const phrase of ['新 id 必须给出 name、aliases、description','不能因档案没变化而省略','不能为了简写隐藏差异'])assert.ok(protocol.system.includes(phrase));
+});

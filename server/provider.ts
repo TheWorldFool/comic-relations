@@ -17,6 +17,7 @@ import { coverReferencePages, coverReferenceLabel } from './identity-context.js'
 import { fetchWithRetry } from './request-retry.js';
 import { createHash } from 'node:crypto';
 import { ModelJsonError, parseModelJson, parseIdentityReviewJson } from './model-json.js';
+import { deduplicateRequestImages } from './request-images.js';
 const configPath = path.join(dataDir, 'settings.json');
 
 type Config = { baseUrl: string; model: string; apiKey?: string };
@@ -121,18 +122,19 @@ async function readPreparedPage(project: Project, signal: AbortSignal, images: R
   for (const { person, image } of portraits) if (image) content.push({type:'text',text:`已知人物参考头像（不是当前页）：${person.id} ${person.name}`},{type:'image_url',image_url:{url:image}});
   for(const cover of covers)if(cover.image)content.push({type:'text',text:coverReferenceLabel(cover.number)},{type:'image_url',image_url:{url:cover.image}});
   content.push({type:'text',text:protocol.task});
+  const requestContent=deduplicateRequestImages(content);
   if (metrics) {
     metrics.preparationMs = Date.now() - prepareStarted;
     metrics.contextCharacters = contextText.length;
     metrics.promptHash = createHash('sha256').update(protocol.system).digest('hex');
-    metrics.imageCount = 1 + Number(!!previousImage) + portraits.filter(p => p.image).length+covers.filter(c=>c.image).length;
+    metrics.imageCount = requestContent.filter(p=>(p as {type?:string}).type==='image_url').length;
   }
   // File processing overlaps the request; the next model call still waits for
   // this page to be validated, applied and saved by run().
   images.prefetch(project);
   const messages: {role: string; content: unknown}[] = [
     { role:'system', content: protocol.system },
-    { role:'user', content },
+    { role:'user', content:requestContent },
   ];
   const attempts: unknown[] = [];
   let recoverTruncation=false;
@@ -175,7 +177,7 @@ async function readPreparedPage(project: Project, signal: AbortSignal, images: R
       detail = error.detail; failedText = error.content; jsonMetadata=error.metadata;
     }
     if (!detail) {
-      const { parsed, adjustments } = parseReadingOutput(output);
+      const { parsed, adjustments, inheritedCharacterFields } = parseReadingOutput(output,project);
       adjustments.unshift(...jsonAdjustments);
       const checked = parsed.success ? protocol.schema.safeParse(parsed.data) : parsed;
       const memoryError = checked.success ? memoryIssue(project, checked.data) : undefined;
@@ -184,7 +186,7 @@ async function readPreparedPage(project: Project, signal: AbortSignal, images: R
           attempts.push({ attempt:attempt+1, output, adjustments, valid:true });
           await saveDiagnostic(true);
         }
-        const reading:Reading=checked.data;
+        const reading:Reading={...checked.data,inheritedCharacterFields};
         if(reading.kind==='story'||page.override==='story'){
           metrics?.onPhase?.('identity');
           reading.identityReview=await reviewIdentities(project,reading,images,signal,async reviewMessages=>{
@@ -208,7 +210,7 @@ async function readPreparedPage(project: Project, signal: AbortSignal, images: R
     if (attempt === 1) throw new ReadingOutputError(detail);
     messages.push(
       { role:'assistant', content:failedText || '{}' },
-      { role:'user', content:`上一条输出未通过校验：${detail}\n${protocol.task}\n请根据同一页漫画和前文，重新返回完整 JSON。只修正格式或补齐从原页可确认的字段，不添加臆测，不删除人物或关系以规避校验。时间不明用空字符串，无别名用 []，头像框不确定用 null；confidence 为 0~1 数字，directed 为布尔值，人物 id 只能含英文字母、数字、下划线和短横线。不要返回解释、Markdown 或 Schema。` },
+      { role:'user', content:`上一条输出未通过校验：${detail}\n${protocol.task}\n请根据同一页漫画和前文，重新返回完整 JSON。只修正格式或补齐从原页可确认的字段，不添加臆测，不删除人物或关系以规避校验。旧 id 可省略未变化的 name/aliases/description，新 id 必须提供 name、aliases、description，不能从 sameAs 候选借用资料。时间不明用空字符串，无别名用 []，头像框不确定用 null；confidence 为 0~1 数字，directed 为布尔值，人物 id 只能含英文字母、数字、下划线和短横线。不要返回解释、Markdown 或 Schema。` },
     );
   }
   throw new Error('阅读输出处理失败。');

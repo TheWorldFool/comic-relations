@@ -10,13 +10,14 @@ import type { Project } from '../shared/types.js';
 
 test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像、断点恢复和重排失效', {timeout:60000}, async t => {
   let calls=0, failOnce=true, incrementalFailure=true, transientCalls=0;
+  const deltaReviewPages:number[]=[];
   let releaseSlow!:()=>void,markSlowStarted!:()=>void,markSlowFinished!:()=>void;
   const slowGate=new Promise<void>(resolve=>{releaseSlow=resolve;});
   const slowStarted=new Promise<void>(resolve=>{markSlowStarted=resolve;});
   const slowFinished=new Promise<void>(resolve=>{markSlowFinished=resolve;});
   let identityMode:'normal'|'pending'|'match'|'confirm'|'blocked'='normal';
   let searchMode: 'valid'|'repair'|'badRepair'='valid',searchCalls=0;
-  let mode: 'normal' | 'uncertain' | 'slow' | 'repair' | 'invalid' | 'badJson' | 'emptyProperty' | 'emptyAlways' | 'syntaxAlways' | 'refused' | 'textRefused' | 'filterRefused' | 'truncated' | 'truncatedAlways' | 'truncatedRefusal' | 'noMessage' | 'incremental' | 'missingMemoryMode' | 'checkpointMismatch' | 'emptyCheckpoint' | 'transient' = 'normal';
+  let mode: 'characterDelta' | 'normal' | 'uncertain' | 'slow' | 'repair' | 'invalid' | 'badJson' | 'emptyProperty' | 'emptyAlways' | 'syntaxAlways' | 'refused' | 'textRefused' | 'filterRefused' | 'truncated' | 'truncatedAlways' | 'truncatedRefusal' | 'noMessage' | 'incremental' | 'missingMemoryMode' | 'checkpointMismatch' | 'emptyCheckpoint' | 'transient' = 'normal';
   const mock=createServer(async (req,res)=>{
     let body='';for await (const chunk of req)body+=chunk;
     const data=JSON.parse(body);
@@ -39,6 +40,7 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
     }
     if(data.messages[0]?.content?.startsWith('你负责漫画人物身份复核')){
       const context=JSON.parse(data.messages[1].content[0].text);
+      if(mode==='characterDelta'){deltaReviewPages.push(context.page);if(context.page===4)assert.ok(context.subjects[0].inheritedFields.includes('name'));}
       if(identityMode==='blocked'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({status:'blocked',reason:'无法安全处理'})},finish_reason:'stop'}]}));return;}
       const decisions=context.subjects.map((person:any)=>({id:person.id,decision:person.sameAs?'match':'new',target:person.sameAs?.id||null,candidates:[],evidence:person.sameAs?[{kind:'visual',text:'左眼痣一致'},{kind:'continuity',text:'上一页开门动作连续'}]:[{kind:'distinct',text:'本页两人独立对话且外貌不同'}],conflicts:[]}));
       if(identityMode==='pending')for(const d of decisions){d.decision='pending';d.target=null;d.evidence=[];}
@@ -64,6 +66,13 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
       if(n===3&&incrementalFailure){incrementalFailure=false;res.writeHead(400);res.end('{}');return;}
       if(n>1)assert.equal(context.memoryState.threads[0].id,'promise');
       const output={kind:'story',confidence:1,reason:'正文',summary:`第${n}页事件`,storyTime:'',memory:n===6?(mode==='emptyCheckpoint'?'   ':'汇总到第6页'):`增量${n}`,memoryMode:mode==='checkpointMismatch'&&n===6?'delta':context.memoryInstruction,threadChanges:n===1?[{action:'upsert',id:'promise',text:'尚未兑现的承诺'}]:n===7?[{action:'resolve',id:'promise',text:'本页明确兑现承诺'}]:[],turningPoint:null,characters:[],relationChanges:[]};
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));return;
+    }
+    if(mode==='characterDelta'){
+      const characters=n===1?[{id:'delta-a',name:'甲',aliases:['小甲'],description:'短发调查员',nameType:'named',avatarBox:null},{id:'delta-b',name:'乙',aliases:[],description:'长发记录员',avatarBox:null}]:[{id:'delta-a',presence:'visible',avatarBox:null,...(n===4?{identityConcern:'耳饰与前页不同，需要复核'}:{})},{id:'delta-b',presence:'visible',avatarBox:null}];
+      const output={kind:'story',confidence:1,reason:'正文',summary:`第${n}页事件`,storyTime:'',memory:`本页事件${n}`,memoryMode:context.memoryInstruction,threadChanges:[],characters,
+        turningPoint:n===3?{title:'正式结盟',reason:'双方明确约定长期合作',confidence:1}:null,
+        relationChanges:n===3?[{action:'upsert',source:'delta-a',target:'delta-b',kind:'team',label:'同盟',directed:false,evidence:'双方约定'}]:[]};
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}));return;
     }
     if(mode==='transient'&&++transientCalls<=2){res.writeHead(transientCalls===1?503:429,{'retry-after':'0'});res.end('{}');return;}
@@ -343,5 +352,16 @@ test('真实 HTTP：导入排序、视觉请求、过滤、阶段去重、头像
   assert.equal((await fetch(base+resilientRoot)).status,400);
   assert.equal((await fetch(base+resilientRoot+'/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,400);
   rp=await call(resilientRoot+'/restore','POST',{confirm:true});assert.equal(rp.processed,1);assert.equal(rp.status,'completed');assert.equal(rp.readingRuns?.[0].attempts,3);
+  const deltaProject=await call('/projects','POST',{name:'系统补全人物档案'}),deltaRoot=`/projects/${deltaProject.id}`;
+  const deltaForm=new FormData();for(let i=1;i<=4;i++)deltaForm.append('files',new Blob([new Uint8Array(bytes)],{type:'image/png'}),`${i}.png`);
+  let dp:Project=await call(deltaRoot+'/pages','POST',deltaForm);
+  await call(deltaRoot+'/page-selection','PUT',{pages:dp.pages.map(page=>({id:page.id,purpose:'story'}))});
+  mode='characterDelta';identityMode='normal';await call(deltaRoot+'/read','POST');dp=await poll(dp.id);
+  assert.equal(dp.status,'completed',dp.error||serverLog);assert.equal(dp.processed,4);assert.equal(dp.characters.length,2);
+  assert.deepEqual(dp.pages.map(page=>page.timing?.attempts),[2,1,1,2],'连续页和纯关系转折只调用主阅读，有疑点时恢复身份复核');
+  assert.deepEqual(deltaReviewPages,[1,4]);assert.deepEqual(dp.pages[2].analysis?.characterIds,['delta-a','delta-b']);
+  assert.equal(dp.characters[0].name,'甲');assert.deepEqual(dp.characters[0].aliases,['小甲']);assert.equal(dp.relations[0].label,'同盟');assert.equal(dp.stages.length,2);
+  const deltaDisk:Project=JSON.parse(await readFile(path.join(dataDir,'projects',dp.id,'project.json'),'utf8'));
+  assert.deepEqual(deltaDisk.characters,dp.characters);assert.equal(deltaDisk.appearances?.length,8);
   await call('/settings','PUT',{baseUrl:`http://localhost:${mockPort}`,model:'test-vision',apiKey:''});const changed=await call('/settings');assert.equal(changed.hasKey,false,'更换地址后不能回退到环境密钥');
 });
