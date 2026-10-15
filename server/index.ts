@@ -1,5 +1,7 @@
 import { identityPeople } from '../shared/identity-people.js';
-import { bindAppearances, rebuildAppearanceEvidence } from './appearances.js';
+import { rebuildAppearanceEvidence } from './appearances.js';
+import { bindWithUndo, restoreAppearanceBinding, type AppearanceBackup } from './appearance-undo.js';
+import { appearanceBindingSchema, appearancePreviewToken, previewAppearanceBinding } from './appearance-preview.js';
 import { addManualAppearance, manualAppearanceSchema } from './manual-appearance.js';
 import 'dotenv/config';
 import express from 'express';
@@ -23,6 +25,7 @@ import { classifyPages } from './page-selection.js';
 import { ReadingImages } from './reading-images.js';
 import { pagesClassified } from '../shared/page-selection.js';
 import { researchBackground } from './background-research.js';
+import { saveReadingCheckpoint, previewReread, prepareReread, originalReread, restoreReread, finishReread, resolveRereadItem, assertRereadReady, dueRereadItems } from './reread.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -98,6 +101,34 @@ app.get('/api/projects/:id/export', async (req, res) => {
   const p = await readProject(req.params.id);
   res.setHeader('Content-Disposition', `attachment; filename="comic-relations-${p.id}.json"`); res.json(p);
 });
+app.post('/api/projects/:id/reread/preview',async(req,res)=>{
+  const {fromPage}=z.object({fromPage:z.number().int().positive()}).parse(req.body);
+  res.json(await exclusive(req.params.id,async()=>previewReread(await readProject(req.params.id),fromPage,projectDir(req.params.id))));
+});
+app.post('/api/projects/:id/reread',async(req,res)=>{
+  const {fromPage,token}=z.object({fromPage:z.number().int().positive(),token:z.string().length(64)}).parse(req.body);
+  res.json(await exclusive(req.params.id,async()=>{
+    const next=await prepareReread(await readProject(req.params.id),fromPage,token,projectDir(req.params.id));
+    await saveProject(next);return next;
+  }));
+});
+app.get('/api/projects/:id/reread/original',async(req,res)=>{
+  const p=await readProject(req.params.id);
+  res.setHeader('Content-Disposition',`attachment; filename="comic-before-reread-${p.id}.json"`);
+  res.json(await originalReread(p,projectDir(p.id)));
+});
+for(const action of ['resolve','restore','finish'] as const)app.post(`/api/projects/:id/reread/${action}`,async(req,res)=>{
+  const {sessionId,itemId}=z.object({sessionId:z.string(),itemId:z.string().optional()}).parse(req.body);
+  res.json(await exclusive(req.params.id,async()=>{
+    let p=await readProject(req.params.id);
+    if(p.reread?.id!==sessionId)throw new Error('重读记录已变化，请刷新后重试。');
+    if(action==='resolve')resolveRereadItem(p,itemId||'');
+    if(action==='restore')p=await restoreReread(p,projectDir(p.id));
+    if(action==='finish')finishReread(p);
+    await saveProject(p);return p;
+  }));
+});
+function assertNoReread(p:Project){if(p.reread)throw new Error('请先完成重读核对或恢复原结果，再修改页序、页面用途或导入页面。');}
 app.post('/api/projects/:id/pages', upload.array('files', 1000), async (req, res) => {
   const files = req.files as Express.Multer.File[];
   const created: string[] = [];
@@ -105,6 +136,7 @@ app.post('/api/projects/:id/pages', upload.array('files', 1000), async (req, res
     const projectId = String(req.params.id);
     const p = await exclusive(projectId, async () => {
       const project = await readProject(projectId);
+      assertNoReread(project);
       if (!files?.length) throw new Error('请选择 JPG、PNG、WebP 或 GIF 图片。');
       const dir = projectDir(project.id);
       await Promise.all(['images','thumbs','avatars'].map(folder => mkdir(path.join(dir, folder), { recursive: true })));
@@ -132,13 +164,14 @@ app.patch('/api/projects/:id', async (req, res) => {
   const data = z.object({ name: z.string().trim().min(1).max(100).optional(), direction: z.enum(['rtl','ltr']).optional(),workContext:z.object({originalWork:z.string().trim().max(300),background:z.string().trim().max(6000),characterGuide:z.string().trim().max(10000),sources:z.array(z.object({title:z.string(),url:z.url().refine(url=>/^https?:\/\//i.test(url))})).max(20).optional()}).optional() }).parse(req.body);
   res.json(await exclusive(req.params.id, async () => {
     const p = await readProject(req.params.id);
+    if(data.direction&&data.direction!==p.direction)assertNoReread(p);
     if (data.direction && data.direction !== p.direction) resetAnalysis(p);
     Object.assign(p, data); p.canUndoMerge=false; await saveProject(p); return p;
   }));
 });
 app.put('/api/projects/:id/page-selection',async(req,res)=>{
   const input=z.object({pages:z.array(z.object({id:z.string(),purpose:z.enum(['story','cover','ad','extra'])})),resetAnalysis:z.boolean().optional()}).parse(req.body);
-  res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);classifyPages(p,input.pages,input.resetAnalysis);await saveProject(p);return p;}));
+  res.json(await exclusive(req.params.id,async()=>{const p=await readProject(req.params.id);assertNoReread(p);classifyPages(p,input.pages,input.resetAnalysis);await saveProject(p);return p;}));
 });
 app.post('/api/projects/:id/background/research',async(req,res)=>{
   const {hint}=z.object({hint:z.string().trim().max(300).optional()}).parse(req.body||{});
@@ -160,7 +193,7 @@ app.post('/api/projects/:id/background/apply',async(req,res)=>{
     await saveProject(p);return p;
   }));
 });
-const mergeStateHash=(p:Project)=>createHash('sha256').update(JSON.stringify({...p,updatedAt:undefined})).digest('hex');
+const mergeStateHash=(p:Project)=>createHash('sha256').update(JSON.stringify({...p,updatedAt:undefined,appearanceUndo:undefined})).digest('hex');
 app.post('/api/projects/:id/characters/merge',async(req,res)=>{
   const {source,target}=z.object({source:z.string(),target:z.string()}).parse(req.body);
   res.json(await exclusive(req.params.id,async()=>{
@@ -219,12 +252,39 @@ app.post('/api/projects/:id/appearances',async(req,res)=>{
     rebuildAppearanceEvidence(p);await saveProject(p);return p;
   }));
 });
+app.post('/api/projects/:id/appearances/bind/preview',async(req,res)=>{
+  const input=appearanceBindingSchema.parse(req.body);
+  res.json(await exclusive(req.params.id,async()=>previewAppearanceBinding(await readProject(req.params.id),input)));
+});
 app.post('/api/projects/:id/appearances/bind',async(req,res)=>{
-  const input=z.object({ids:z.array(z.string()).min(1).max(200),characterId:z.string().nullable(),reason:z.string().trim().min(1).max(1000),newName:z.string().trim().min(1).max(200).optional()}).parse(req.body);
+  const input=appearanceBindingSchema.parse(req.body);
   res.json(await exclusive(req.params.id,async()=>{
     const p=await readProject(req.params.id);
-    bindAppearances(p,input.ids,input.characterId,input.reason,input.newName);
-    await saveProject(p);return p;
+    if(input.previewToken&&input.previewToken!==appearancePreviewToken(p,input))throw new Error('项目或校正内容已变化，请重新预览影响后保存。');
+    const previous=p.appearanceUndo?.id;
+    const backup=bindWithUndo(p,input);
+    await writeFile(appearanceBackupPath(p.id,backup.id),JSON.stringify(backup),{flag:'wx'});
+    await saveProject(p);
+    if(previous)await rm(appearanceBackupPath(p.id,previous),{force:true}).catch(()=>{});
+    return p;
+  }));
+});
+function appearanceBackupPath(projectId:string,undoId:string){
+  if(!/^[a-f0-9-]{36}$/.test(undoId))throw new Error('无效校正记录。');
+  return path.join(projectDir(projectId),`appearance-undo-${undoId}.json`);
+}
+app.post('/api/projects/:id/appearances/bind/undo',async(req,res)=>{
+  const {undoId}=z.object({undoId:z.string().uuid()}).parse(req.body);
+  res.json(await exclusive(req.params.id,async()=>{
+    const current=await readProject(req.params.id);
+    if(current.appearanceUndo?.id!==undoId)throw new Error('最近一次校正已变化，请刷新后核对。');
+    const file=appearanceBackupPath(current.id,undoId);
+    let backup:AppearanceBackup|null=null;
+    try{backup=JSON.parse(await readFile(file,'utf8'));}catch{}
+    const restored=restoreAppearanceBinding(current,backup,undoId);
+    await saveProject(restored);
+    await rm(file,{force:true}).catch(()=>{});
+    return restored;
   }));
 });
 app.post('/api/projects/:id/corrections',async(req,res)=>{
@@ -238,6 +298,7 @@ app.post('/api/projects/:id/characters/merge/rewind',async(req,res)=>{
   if(req.body?.confirm!==true)throw new Error('请确认回到合并前，后续页面需要重新分析。');
   res.json(await exclusive(req.params.id,async()=>{
     const current=await readProject(req.params.id);
+    assertNoReread(current);
     const backup=JSON.parse(await readFile(path.join(projectDir(current.id),'identity-merge-backup.json'),'utf8').catch(()=>'null')) as {before:Project}|null;
     if(!current.canRewindMerge||!backup)throw new Error('没有可恢复的最近合并记录。');
     const restored=backup.before;
@@ -248,6 +309,7 @@ app.post('/api/projects/:id/characters/merge/rewind',async(req,res)=>{
     restored.readingRuns=current.readingRuns;restored.workContext=current.workContext;restored.name=current.name;
     restored.status=restored.processed<restored.pages.length?'paused':'completed';delete restored.error;
     restored.canUndoMerge=false;restored.canRewindMerge=false;
+    if(restored.appearanceUndo)restored.appearanceUndo.available=false;
     await saveProject(restored);return restored;
   }));
 });
@@ -255,6 +317,7 @@ app.put('/api/projects/:id/order', async (req, res) => {
   const { ids } = z.object({ ids: z.array(z.string()) }).parse(req.body);
   res.json(await exclusive(req.params.id, async () => {
     const p = await readProject(req.params.id);
+    assertNoReread(p);
     reorderPages(p,ids);
     await saveProject(p); return p;
   }));
@@ -263,6 +326,7 @@ app.patch('/api/projects/:id/pages/:pageId', async (req, res) => {
   const { override } = z.object({ override: z.enum(['auto','story','skip']) }).parse(req.body);
   res.json(await exclusive(req.params.id, async () => {
     const p = await readProject(req.params.id); const index = p.pages.findIndex(page => page.id === req.params.pageId);
+    assertNoReread(p);
     if (index < 0) throw new Error('页面不存在。');
     if (p.pages[index].override !== override) { p.pages[index].override = override; if (index < p.processed) resetAnalysis(p); }
     p.canUndoMerge=false;
@@ -275,6 +339,7 @@ app.patch('/api/projects/:id/pages/:pageId', async (req, res) => {
 app.delete('/api/projects/:id/pages/:pageId', async (req, res) => {
   res.json(await exclusive(req.params.id, async () => {
     const p = await readProject(req.params.id); const index = p.pages.findIndex(page => page.id === req.params.pageId);
+    assertNoReread(p);
     if (index < 0) throw new Error('页面不存在。');
     ensureReadingRuns(p);
     p.canUndoMerge=false;
@@ -296,10 +361,12 @@ app.put('/api/projects/:id/characters/:characterId/avatar', async (req, res) => 
   res.json(await exclusive(req.params.id, async () => {
     const p = await readProject(req.params.id); const person = p.characters.find(c => c.id === req.params.characterId); const page = p.pages.find(pg => pg.id === input.pageId);
     if (!person || !page) throw new Error('人物或页面不存在。');
+    const sourcePage=p.pages.indexOf(page)+1;
+    if(sourcePage>p.processed)throw new Error('请从已读页面选择头像，未读画面不能加入人物参考。');
     const avatar = await cropAvatar(p.id, page, person.id, input); person.avatar = avatar;
     addReference(person,{url:avatar,page:p.pages.indexOf(page)+1,view:'manual'});
     p.canUndoMerge=false;
-    for (const stage of p.stages) { const c = stage.characters.find(c => c.id === person.id); if (c) c.avatar = avatar; }
+    for (const stage of p.stages) { const c = stage.characters.find(c => c.id === person.id); if (c&&sourcePage<=stage.toPage) c.avatar = avatar; }
     await saveProject(p); return p;
   }));
 });
@@ -331,6 +398,8 @@ async function run(project: Project, controller: AbortController) {
   };
   try {
     while (project.processed < project.pages.length && !controller.signal.aborted) {
+      if(dueRereadItems(project).length){project.status='paused';project.error='已到达保留校正的证据页，请在重读面板核对后继续。';return;}
+      await saveReadingCheckpoint(project,projectDir(project.id));
       const page = project.pages[project.processed];
       if (page.override === 'skip') {
         applyReading(project, { kind:page.purpose||'extra', confidence:1, reason:'手动排除，不参与剧情理解', summary:'', storyTime:'', memory: project.memory, turningPoint:null, characters:[], relationChanges:[] });
@@ -353,7 +422,7 @@ async function run(project: Project, controller: AbortController) {
       }
       await saveProject(project);
     }
-    project.status = controller.signal.aborted ? 'paused' : 'completed';
+    project.status = controller.signal.aborted||dueRereadItems(project).length ? 'paused' : 'completed';
   } catch (error) {
     recordTiming(controller.signal.aborted?'cancelled':'error');
     project.status = controller.signal.aborted || error instanceof ModelRefusalError ? 'paused' : 'error';
@@ -364,6 +433,7 @@ async function run(project: Project, controller: AbortController) {
 app.post('/api/projects/:id/read', async (req, res) => {
   const p = await exclusive(req.params.id, async () => {
     const project = await readProject(req.params.id);
+    assertRereadReady(project);
     if (!project.pages.length) throw new Error('请先导入漫画。');
     if(!pagesClassified(project.pages))throw new Error('开始分析前，请先完成所有页面的正文、封面和附页划分。');
     if (!(await publicSettings()).hasKey) throw new Error('请先配置 API Key。');

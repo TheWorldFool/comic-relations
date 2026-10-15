@@ -6,6 +6,7 @@ export default function ReviewNotice({project,busy,onView,onContinue}:{
 }) {
   const page=project.pages[project.processed];
   if(!page||!['paused','error'].includes(project.status))return null;
+  if(project.reread?.items.some(i=>!i.resolved&&i.page<=project.processed))return null;
   // A refused page keeps its own explanation in the reading controls; there is
   // nothing to resume until the user excludes it.
   if(page.analysis?.kind==='blocked'&&page.override!=='skip')return null;

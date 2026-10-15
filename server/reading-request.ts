@@ -1,4 +1,6 @@
-import { identityView, appearanceCorrections } from '../shared/identity-people.js';
+import { identityView, appearanceCorrections, pageIdentityIds } from '../shared/identity-people.js';
+import { narrativeReviewContext, summaryNeedsReview } from '../shared/story-review.js';
+import { rereadPageHints } from '../shared/reread.js';
 import { memoryPlan } from './reading-memory.js';
 import { identityHistory } from './identity-context.js';
 import type { Project, CharacterFact } from '../shared/types.js';
@@ -16,14 +18,13 @@ export function readingOptions(model:string,recoverTruncation=false){
 // Full identity/state indexes remain available, including long-absent people.
 // Only repeated evidence and portraits are selected by recent relevance.
 export function referenceCharacters(project:Project){
-  const canonical=(id:string)=>{const seen=new Set<string>();while(project.identityRedirects?.[id]&&!seen.has(id)){seen.add(id);id=project.identityRedirects[id];}return id;};
   const scores=new Map<string,number>();
   for(const person of project.characters){
     const last=Math.max(person.firstPage,...(person.records||[]).map(r=>r.sincePage));
     scores.set(person.id,last);
   }
-  const recent=project.pages.slice(0,project.processed).filter(p=>p.analysis?.kind==='story').slice(-3);
-  recent.forEach((page,index)=>page.analysis?.characterIds?.forEach(id=>scores.set(canonical(id),project.processed+index+1)));
+  const recent=project.pages.slice(0,project.processed).flatMap((p,index)=>p.analysis?.kind==='story'?[index+1]:[]).slice(-3);
+  recent.forEach((page,index)=>pageIdentityIds(project,page).forEach(id=>scores.set(id,project.processed+index+1)));
   return project.characters.filter(c=>!c.archived).sort((a,b)=>(scores.get(b.id)||0)-(scores.get(a.id)||0)||a.id.localeCompare(b.id)).slice(0,8);
 }
 const compactFact=({evidence,...fact}:CharacterFact)=>fact;
@@ -33,9 +34,11 @@ export function readingContext(project:Project){
   const active=new Set(referenceCharacters(project).map(c=>c.id));
   return {page:project.processed+1,filename:page.name,direction:project.direction,forcedStory:page.override==='story',
     appearanceCorrections:appearanceCorrections(project),
-    recentAppearances:(project.appearances||[]).filter(a=>a.page>=project.processed-2).map(a=>({id:a.id,page:a.page,characterId:a.characterId,trackId:a.trackId,observed:a.observed.appearance,outfit:a.observed.outfit,hairStyle:a.observed.hairStyle,referenceApproved:['manual','reviewed'].includes(a.verification)})),
+    narrativeReview:narrativeReviewContext(project),
+    rereadHints:rereadPageHints(project),
+    recentAppearances:(project.appearances||[]).filter(a=>a.page>=Math.max(1,project.processed-2)&&a.page<=project.processed&&project.pages[a.page-1]?.id===a.pageId).map(a=>({id:a.id,page:a.page,characterId:a.characterId,trackId:a.trackId,observed:a.observed.appearance,outfit:a.observed.outfit,hairStyle:a.observed.hairStyle,referenceApproved:['manual','reviewed'].includes(a.verification)})),
     manualCorrections:project.corrections||[],workContext:project.workContext||null,identityRedirects:project.identityRedirects||{},
-    recentPages:project.pages.slice(0,project.processed).flatMap((p,index)=>p.analysis?.kind==='story'?[{page:index+1,name:p.name,summary:p.analysis.summary,characterIds:p.analysis.characterIds}]:[]).slice(-3),
+    recentPages:project.pages.slice(0,project.processed).flatMap((p,index)=>p.analysis?.kind==='story'?[{page:index+1,name:p.name,summary:p.analysis.summary,summaryNeedsReview:summaryNeedsReview(project,index+1),characterIds:pageIdentityIds(project,index+1)}]:[]).slice(-3),
     characters:project.characters.map(({avatar,references,records,profile,statuses,...person})=>({...person,...(person.identityState==='pending'?identityHistory(project,person.id):{}),
       profile:profile?.map(f=>f.certainty==='uncertain'||f.sincePage>=project.processed-2?f:compactFact(f)),
       statuses:statuses?.map(f=>f.certainty==='uncertain'||f.sincePage>=project.processed-2?f:compactFact(f)),

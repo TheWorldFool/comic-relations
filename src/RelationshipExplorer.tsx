@@ -6,7 +6,7 @@ import { groupRelations } from './graph-layout';
 import type { Stage } from '../shared/types';
 
 type Props = {
-  stage:Stage; stages:Stage[]; selectedPerson:string|null; following:boolean;
+  stage:Stage; reviewFromPage?:number; reviewThroughPage?:number; stages:Stage[]; selectedPerson:string|null; following:boolean;
   onSelectPerson:(id:string)=>void; onClearPerson:()=>void; onStage:(index:number|null)=>void;
   onPage:(page:number)=>void; onCrop:()=>void; canCrop:boolean;
 };
@@ -92,7 +92,7 @@ export default function RelationshipExplorer(props:Props) {
       <aside className="relationship-inspector" aria-label="关系详情" hidden={!inspectorOpen}>
         <div className="inspector-heading"><strong>{tab==='dossier'?'角色档案':tab==='relations'?`关系证据 · ${relations.length}`:'阶段说明'}</strong><button ref={inspectorClose} className="text-button" onClick={closeInspector} aria-label="关闭详情，返回关系图"><X size={15}/>收起详情</button></div>
         <div ref={inspectorContent} className="relationship-inspector-content">
-          {tab==='dossier'?<CharacterDossier key={stage.id} people={stage.characters} person={person} toPage={stage.toPage} onSelect={selectPerson} onClear={clear} onPage={openPage} onCrop={()=>{setFocused(false);onCrop();}} canCrop={canCrop}/>:tab==='stage'?<div className="relationship-notes"><h4>{index===0?'初始关系':'阶段转折'}</h4><p>{stage.turningReason||stage.title}</p>{stage.storyTime&&<><h4>故事时间</h4><p>{stage.storyTime}</p></>}{stage.changes.length>0&&<><h4>本阶段记录</h4><ul>{stage.changes.map((change,i)=><li key={i}>{change}</li>)}</ul></>}<button className="text-button" onClick={()=>openPage(stage.fromPage)}><BookOpen size={14}/>查看阶段起始页 P.{stage.fromPage}</button><small>对应第 {stage.fromPage}–{stage.toPage} 页。一般互动归入当前阶段，重大转折才新增阶段。</small></div>:<>
+          {tab==='dossier'?<CharacterDossier key={stage.id} people={stage.characters} person={person} toPage={stage.toPage} onSelect={selectPerson} onClear={clear} onPage={openPage} onCrop={()=>{setFocused(false);onCrop();}} canCrop={canCrop}/>:tab==='stage'?<div className="relationship-notes">{props.reviewFromPage&&stage.toPage>=props.reviewFromPage&&stage.fromPage<=(props.reviewThroughPage||Infinity)&&<p className="identity-note">人物或事实已校正。本阶段标题、转折说明仍是原阅读结论，尚未重新核对；已结束阶段的图保留当时结果。</p>}<h4>{index===0?'初始关系':'阶段转折'}</h4><p>{stage.turningReason||stage.title}</p>{stage.storyTime&&<><h4>故事时间</h4><p>{stage.storyTime}</p></>}{stage.recordsIncomplete&&<p className="identity-note">早期分析缺少逐页证据，仅展示可核对的记录。</p>}{stage.changes.length>0&&<><h4>{stage.recordsRebuilt?'已记录事件（按校正重建）':'本阶段记录'}</h4><ul>{stage.changes.map((change,i)=><li key={i}>{change}</li>)}</ul></>}<button className="text-button" onClick={()=>openPage(stage.fromPage)}><BookOpen size={14}/>查看阶段起始页 P.{stage.fromPage}</button><small>对应第 {stage.fromPage}–{stage.toPage} 页。一般互动归入当前阶段，重大转折才新增阶段。</small></div>:<>
             {(person||activeGroup)&&<div className="relationship-focus"><strong>{person?person.name:`${name(activeGroup!.source)} · ${name(activeGroup!.target)}`}</strong><button className="icon-button" title="显示全部关系" aria-label="显示全部关系" onClick={clear}><X size={14}/></button></div>}
             {person&&<div className="relationship-person-info"><p>{person.description||'暂无人物描述'}</p>{person.aliases.length>0&&<small>别名：{person.aliases.join('、')}</small>}<button className="text-button" disabled={!canCrop} onClick={()=>{setFocused(false);onCrop();}}><Scissors size={12}/>从当前页框选头像</button></div>}
             <div className="relationship-evidence">{relations.map((relation,i)=><article key={i}>

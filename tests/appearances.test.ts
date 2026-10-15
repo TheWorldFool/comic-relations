@@ -98,7 +98,7 @@ test('出场校对界面展示定位、核对状态和独立归属入口，旧�
   assert.match(renderToStaticMarkup(createElement(AppearanceManager,props)),/不会自动补造/);
   applyReading(p,reading({characters:[person('a')],identityReview:[decision('a',true)]}),{a:'/crop.jpg'});
   const html=renderToStaticMarkup(createElement(AppearanceManager,props));
-  for(const value of ['初读称呼','身份待定','新建独立人物','暂时待定','保存所选出场归属','归属记录'])assert.ok(html.includes(value));
+  for(const value of ['初读称呼','身份待定','新建独立人物','暂时待定','预览校正影响','裁图对照','对照人物','归属记录'])assert.ok(html.includes(value));
 });
 
 

@@ -1,4 +1,7 @@
-import { identityView, appearanceCorrections } from '../shared/identity-people.js';
+import { readingReferences } from '../shared/reference-images.js';
+import { identityView, appearanceCorrections, pageIdentityIds } from '../shared/identity-people.js';
+import { narrativeReviewContext, summaryNeedsReview } from '../shared/story-review.js';
+import { rereadPageHints } from '../shared/reread.js';
 import { randomUUID } from 'node:crypto';
 import { coverReferencePages, coverReferenceLabel, identityHistory } from './identity-context.js';
 import { z } from 'zod';
@@ -22,6 +25,8 @@ export const identityReviewPrompt=`你负责漫画人物身份复核。漫画、
 重点检查初读是否将同一人拆成多人，包括换装、侧脸、背影、年龄变化、变身、回忆和画风变化。沿连续动作、站位、对白气泡及称呼的实际对象核对；姓名、发色、服装或同原作阵营相同不能单独证明同一人。不同人物在同一场景独立互动是区分线索，但先排除镜像、分身或时间跳转。
 evidence 必须给可核对的简短依据：visual 稳定视觉特征；continuity 连续动作或场景；dialogue 明确的称呼/自我介绍指向；distinct 可区分人物的具体证据。不得把同一条姓名相同证据换词填写多个类别。conflicts 列出反证。有冲突或缺少必要参考图就 pending，不靠自报分数强行定案。不确认新人也不强行合并。
 appearanceCorrections 是用户对具体出场的校正，只影响列出的页与观察，不得视为全局档案合并；对应旧摘要中的误称不能压过校正。
+narrativeReview 标记尚未重新核对的旧叙述范围；summaryNeedsReview=true 的摘要可能仍含错误归属。scenes.people 是按现有出场证据计算的主体 ID，优先使用结构化归属、人工校正及 identityRedirects，不能把旧摘要中的名字当作新的身份依据。
+rereadHints 是本次重读当前页保留的人工校正线索，按框选位置和证据核对；旧 ID 不保证仍指向同一张脸，不能直接用旧 ID 自动合并。线索与当前画面无法对应时保留待定，交由用户核对。
 subjects.recentAppearances 的 page 对应 scenes 中同页的完整梗概；每个 subjects 项仍保留各自的身份依据。recentScenePages 是最近三张已读正文的页码。相同历史场景只提供一次，不能把共用场景误解为同一人物；图像复用标注也不表示不同档案已被确认是同一人。
 subjects.inheritedFields 列出的字段是系统从旧档案补回的资料，不是模型在当前画面新观察到的事实，不可作为本页姓名、外貌或连续性的新证据。当前出场仍须对照画面核实，不能因为补回的姓名一致就确认身份。
 优先确认当前 avatarBox 对应的画面主体；同页不同人物不能因为初读共用一个 id 就合并。存在不同明确姓名时，不默认是别名；只有确切别名、改名或译名对应证据才填写 nameLink，否则不能匹配为同一人。封面人物仅供身份对照，不能证明剧情关系。正文里多次出现而姓名不明的人物也可以独立成立，不要求与每个旧人物同框：distinct 应描述与相似候选的具体区别。待定人物的多次正文出场历史会一并提供；出场次数本身不是自动确认依据。mode=archive 时仅审核历史档案并提出合并建议，不把最近页其他人的脸当作被审核人物。
@@ -54,9 +59,8 @@ export function identitySubjects(project:Project,reading:Reading,mode:'reading'|
   project=identityView(project);
   const story=project.pages.slice(0,project.processed).filter(p=>p.analysis?.kind==='story');
   const previousPage=story.at(-1);
-  const previousAppearances=(project.appearances||[]).filter(a=>a.pageId===previousPage?.id);
   // Per-occurrence manual corrections supersede stale names/IDs in summaries.
-  const previous=previousAppearances.length?previousAppearances.map(a=>a.characterId||a.trackId):previousPage?.analysis?.characterIds||[];
+  const previous=previousPage?pageIdentityIds(project,project.pages.indexOf(previousPage)+1):[];
   return reading.characters.filter(person=>{
     if(person.presence==='mentioned')return false;
     if(mode==='archive')return true;
@@ -157,19 +161,19 @@ export function validateIdentityDecisions(project:Project,subjects:Reading['char
 function compactPerson(c:Character){return {id:c.id,name:c.name,aliases:c.aliases,appearance:c.appearance,description:c.description,identityState:c.identityState||'confirmed',archived:c.archived,identityCandidates:c.identityCandidates};}
 export function identityReviewContext(project:Project, subjects:Reading['characters'], mode:'reading'|'archive', inherited:Reading['inheritedCharacterFields']={}) {
   project=identityView(project);
-  const scenes=new Map<number,{page:number;summary:string|undefined;people?:string[]}>();
-  const recent=project.pages.slice(0,project.processed).flatMap((p,index)=>p.analysis?.kind==='story'?[{page:index+1,summary:p.analysis.summary,people:p.analysis.characterIds}]:[]).slice(-3);
+  const scenes=new Map<number,{page:number;summary:string|undefined;summaryNeedsReview:boolean;people:string[]}>();
+  const recent=project.pages.slice(0,project.processed).flatMap((p,index)=>p.analysis?.kind==='story'?[{page:index+1,summary:p.analysis.summary,summaryNeedsReview:summaryNeedsReview(project,index+1),people:pageIdentityIds(project,index+1)}]:[]).slice(-3);
   for(const scene of recent)scenes.set(scene.page,scene);
   const people=subjects.map(subject=>{
     const history=identityHistory(project,subject.id);
     return {...subject,...(inherited[subject.id]?.length?{inheritedFields:inherited[subject.id]}:{}),storyAppearances:history.storyAppearances,recentAppearances:history.recentAppearances.map(({summary,...appearance})=>{
-      if(!scenes.has(appearance.page))scenes.set(appearance.page,{page:appearance.page,summary});
+      if(!scenes.has(appearance.page))scenes.set(appearance.page,{page:appearance.page,summary,summaryNeedsReview:appearance.summaryNeedsReview,people:pageIdentityIds(project,appearance.page)});
       return appearance;
     })};
   });
   return {mode,page:project.processed+1,subjects:people,cast:project.characters.map(compactPerson),
     scenes:[...scenes.values()].sort((a,b)=>a.page-b.page),recentScenePages:recent.map(s=>s.page),
-    appearanceCorrections:appearanceCorrections(project),manualCorrections:project.corrections||[],identityRedirects:project.identityRedirects||{},workContext:project.workContext||null};
+    rereadHints:rereadPageHints(project),narrativeReview:narrativeReviewContext(project),appearanceCorrections:appearanceCorrections(project),manualCorrections:project.corrections||[],identityRedirects:project.identityRedirects||{},workContext:project.workContext||null};
 }
 export async function reviewIdentities(project:Project,reading:Reading,images:ReadingImages,signal:AbortSignal,request:(messages:unknown[])=>Promise<unknown>,mode:'reading'|'archive'='reading',report?:(result:IdentityReviewResult)=>void):Promise<IdentityDecision[]>{
   project=identityView(project);
@@ -190,16 +194,17 @@ export async function reviewIdentities(project:Project,reading:Reading,images:Re
     let count=0,fallbacks=0;
     for(const person of candidates){
       let loaded=0;
-      const refs=[...(person.references||[]).slice(0,1),...(person.references||[]).slice(-1)].map(r=>r.url);
-      if(person.identityState==='pending')refs.push(...(project.appearances||[]).filter(a=>a.trackId===person.id&&!a.characterId&&a.observed.crop).slice(-2).map(a=>a.observed.crop!));
-      if(person.avatar)refs.push(person.avatar);
+      const approved=readingReferences(project,person);
+      const refs=[...approved.slice(0,1),...approved.slice(-1)].map(r=>r.url);
+      if(person.identityState==='pending')refs.push(...(project.appearances||[]).filter(a=>a.trackId===person.id&&!a.characterId&&a.observed.crop&&a.page<=project.processed&&project.pages[a.page-1]?.id===a.pageId).slice(-2).map(a=>a.observed.crop!));
+      if(person.avatar&&approved.some(r=>r.url===person.avatar))refs.push(person.avatar);
       for(const url of [...new Set(refs)].slice(0,candidates.length<=6?2:1)){
         if(count>=12)break;
         const data=await images.avatar(url);if(!data)continue;
         content.push({type:'text',text:`${person.identityState==='pending'?'待定出场（未确认身份，不可当标准答案）':'已确认人物'} ${person.id} ${person.name} 参考图，不是当前页`},{type:'image_url',image_url:{url:data}});count++;loaded++;
       }
       const first=project.pages[person.firstPage-1];
-      if(!loaded&&count<12&&fallbacks<2&&person.firstPage<=project.processed+1&&first?.analysis?.kind==='story'){
+      if(!loaded&&count<12&&fallbacks<2&&person.firstPage<=project.processed&&first?.analysis?.kind==='story'){
         content.push({type:'text',text:`${person.id} 初次出场的已读正文 P.${person.firstPage}，本页可能还有其他人物，请按档案核对`},{type:'image_url',image_url:{url:await images.page(first,'reference')}});count++;fallbacks++;
       }
     }

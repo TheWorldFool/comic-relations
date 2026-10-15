@@ -1,5 +1,8 @@
 export type PageKind = 'story' | 'cover' | 'ad' | 'extra' | 'uncertain' | 'blocked';
 export type Box = { x: number; y: number; width: number; height: number };
+export type AppearanceBindingInput={ids:string[];characterId:string|null;reason:string;newName?:string;previewToken?:string};
+export interface AppearanceBindingPreview {token:string;pages:number[];selected:number;changes:{kind:'人物'|'关系'|'档案'|'状态';before:string|null;after:string|null}[];}
+export interface AppearanceUndo {id:string;selected:number;pages:number[];targetName:string;reason:string;createdAt:string;stateHash:string;available:boolean;}
 export interface ManualAppearanceInput {pageId:string;characterId:string|null;name:string;nameType:'named'|'descriptive';appearance:string;reason:string;box:Box;}
 export interface CharacterFact { appearanceId?:string; key:string; label:string; value:string; certainty:'confirmed'|'uncertain'; evidence:string; sincePage:number; target?:string; }
 export interface CharacterRecord extends CharacterFact { section:'profile'|'status'; action:'upsert'|'remove'; }
@@ -20,7 +23,7 @@ export interface PageTiming { identityReviewMs?:number; identityReviewResult?:Id
 export interface ReadingRun extends PageTiming { task?:"reading"|"identity-review"; id:string;pageId:string;pageNumber:number;recordedAt:string;outcome:'success'|'error'|'cancelled'|'legacy'; }
 export interface ReadingMemory { version:1; checkpointPage:number; pending:{page:number;text:string}[]; threads:{id:string;text:string;sincePage:number}[]; }
 export interface Relation { sourceAppearanceId?:string; targetAppearanceId?:string; source: string; target: string; kind: string; label: string; directed: boolean; evidence: string; sincePage: number; }
-export interface Stage { id: string; fromPage: number; toPage: number; title: string; storyTime: string; characters: Character[]; relations: Relation[]; changes: string[]; turningReason?: string; baselineRelations?: Relation[]; baselineStatuses?:Pick<Character,'id'|'statuses'>[]; }
+export interface Stage { recordsRebuilt?:boolean; recordsIncomplete?:boolean; originalChanges?:string[]; id: string; fromPage: number; toPage: number; title: string; storyTime: string; characters: Character[]; relations: Relation[]; changes: string[]; turningReason?: string; baselineRelations?: Relation[]; baselineStatuses?:Pick<Character,'id'|'statuses'>[]; }
 export interface Page { id: string; name: string; image: string; thumbnail: string; width: number; height: number; override: 'auto' | 'story' | 'skip'; purpose?:PagePurpose; analysis?: { kind: PageKind; confidence: number; reason: string; summary: string; storyTime: string; characterIds?:string[]; identityObservations?:{personId:string;name:string;evidence:string;decision:string}[] }; timing?:PageTiming; }
 export interface AppearanceEndpoint { appearanceId?:string; characterId?:string; }
 export interface AppearanceFactUpdate { action:'upsert'|'remove'; key:string; label:string; value:string; certainty:'confirmed'|'uncertain'; evidence:string; target?:AppearanceEndpoint; }
@@ -37,7 +40,11 @@ export interface AppearanceRelationEvent { manual?:boolean; evidencePage?:number
 export interface IdentityBaseline { throughPage:number; characters:Character[]; relations:Relation[]; }
 export type ReadingPhase='preparing'|'reading'|'repairing'|'identity'|'saving';
 export interface ReadingActivity {phase:ReadingPhase;page:number;startedAt:number;}
-export interface Project { readingActivity?:ReadingActivity; appearances?:Appearance[]; appearanceFacts?:AppearanceFactEvent[]; appearanceRelations?:AppearanceRelationEvent[]; identityBaseline?:IdentityBaseline; pendingIdentities?:Character[]; identityReviewNotice?:string; id: string; name: string; createdAt: string; updatedAt: string; direction: 'rtl' | 'ltr'; pages: Page[]; characters: Character[]; relations: Relation[]; stages: Stage[]; memory: string; readingMemory?:ReadingMemory; readingRuns?:ReadingRun[]; processed: number; status: 'idle' | 'running' | 'paused' | 'completed' | 'error'; error?: string; workContext?:WorkContext; backgroundResearch?:BackgroundResearch; identityRedirects?:Record<string,string>; identitySuggestions?:IdentitySuggestion[]; mentions?:Mention[]; canUndoMerge?:boolean; canRewindMerge?:boolean; corrections?:ManualCorrection[]; }
+export interface ReadingCheckpoint {id:string;throughPage:number;hash:string;}
+export interface RereadReviewItem {id:string;page:number;kind:string;title:string;detail:string;data:unknown;resolved?:boolean;}
+export interface RereadSession {id:string;backupHash:string;fromPage:number;previousProcessed:number;createdAt:string;items:RereadReviewItem[];}
+export interface RereadPreview {fromPage:number;throughPage:number;available:boolean;availableFromPages:number[];token:string;items:RereadReviewItem[];}
+export interface Project { readingCheckpoints?:ReadingCheckpoint[]; reread?:RereadSession; manualCharacterEdits?:ManualCorrection[]; storyReviewFromPage?:number; storyReviewThroughPage?:number; appearanceUndo?:AppearanceUndo; readingActivity?:ReadingActivity; appearances?:Appearance[]; appearanceFacts?:AppearanceFactEvent[]; appearanceRelations?:AppearanceRelationEvent[]; identityBaseline?:IdentityBaseline; pendingIdentities?:Character[]; identityReviewNotice?:string; id: string; name: string; createdAt: string; updatedAt: string; direction: 'rtl' | 'ltr'; pages: Page[]; characters: Character[]; relations: Relation[]; stages: Stage[]; memory: string; readingMemory?:ReadingMemory; readingRuns?:ReadingRun[]; processed: number; status: 'idle' | 'running' | 'paused' | 'completed' | 'error'; error?: string; workContext?:WorkContext; backgroundResearch?:BackgroundResearch; identityRedirects?:Record<string,string>; identitySuggestions?:IdentitySuggestion[]; mentions?:Mention[]; canUndoMerge?:boolean; canRewindMerge?:boolean; corrections?:ManualCorrection[]; }
 export interface Settings { baseUrl: string; model: string; hasKey: boolean; }
 
 export type CorrectionInput = {scope?:'once'|'fixed'} & (

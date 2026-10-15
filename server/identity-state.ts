@@ -1,5 +1,6 @@
 import { identityPeople, separatePending } from '../shared/identity-people.js';
 import { confirmTrackAppearances } from './appearances.js';
+import { rebuildStageRecords } from './stage-records.js';
 import type { Character, CharacterReference, Project } from '../shared/types.js';
 
 // Pending people and their evidence remain stored, but do not assert graph facts.
@@ -16,8 +17,9 @@ export function visibleRelations(project:Project){
 }
 export function addReference(person:Character,reference:CharacterReference){
   const refs=[...(person.references||[])];
-  if(refs.some(r=>r.page===reference.page&&r.view===reference.view))return;
-  refs.push(reference);
+  const existing=refs.findIndex(r=>r.page===reference.page&&r.view===reference.view);
+  if(existing>=0){if(reference.view!=='manual')return;refs[existing]=reference;}
+  else refs.push(reference);
   // Keep the first appearance and the latest sample of each other view, capped at four.
   const byView=new Map<string,CharacterReference>();
   for(const ref of refs.slice(1))byView.set(ref.view,ref);
@@ -31,5 +33,5 @@ export function confirmIdentity(project:Project,id:string,evidence='用户确认
   separatePending(project);
   project.canUndoMerge=false;
   const stage=project.stages.at(-1);
-  if(stage){stage.characters=structuredClone(visibleCast(project));stage.relations=structuredClone(visibleRelations(project));}
+  if(stage){stage.characters=structuredClone(visibleCast(project));stage.relations=structuredClone(visibleRelations(project));if(stage.recordsRebuilt)rebuildStageRecords(project,stage);}
 }

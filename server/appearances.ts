@@ -1,3 +1,4 @@
+import { rebuildStageRecords } from './stage-records.js';
 import { refreshCastEvidence } from './cast-evidence.js';
 import { randomUUID } from 'node:crypto';
 import type { Appearance, AppearanceEndpoint, Project, Character } from '../shared/types.js';
@@ -113,6 +114,7 @@ export function rebuildAppearanceEvidence(project:Project){
   const stage=project.stages.at(-1);
   if(stage){
     stage.characters=structuredClone(visibleCast(project));stage.relations=structuredClone(visibleRelations(project));
+    rebuildStageRecords(project,stage);
     // The reader compares future changes with this stage's starting state.
     // Correct its identities too, using only evidence available at that point.
     if(stage.fromPage>project.identityBaseline.throughPage){
@@ -144,6 +146,7 @@ export function bindAppearances(project:Project,ids:string[],characterId:string|
   if(selected.some(a=>!a||a.page>draft.processed))throw new Error('出场记录不存在或超出已读范围。');
   for(const a of selected as Appearance[]){
     if(a.characterId===characterId&&a.verification==='manual')continue;
+    if(a.characterId!==characterId){draft.storyReviewFromPage=Math.min(draft.storyReviewFromPage??Infinity,a.page);draft.storyReviewThroughPage=Math.max(draft.storyReviewThroughPage||0,draft.processed);}
     a.characterId=characterId;a.verification=characterId?'manual':'pending';
     // Detaching one occurrence must not attach its facts back to the old person.
     if(!characterId){

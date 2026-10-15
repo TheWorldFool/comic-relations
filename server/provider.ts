@@ -1,3 +1,4 @@
+import { readingPortrait } from '../shared/reference-images.js';
 import type { ReadingPhase } from '../shared/types.js';
 import { identityView } from '../shared/identity-people.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -109,7 +110,7 @@ async function readPreparedPage(project: Project, signal: AbortSignal, images: R
   let previousIndex = project.processed - 1;
   while (previousIndex >= 0 && project.pages[previousIndex].analysis?.kind !== 'story') previousIndex--;
   const previous = project.pages[previousIndex];
-  const references = referenceCharacters(project).filter(person => person.avatar&&person.identityState!=='pending');
+  const references = referenceCharacters(project).map(person=>({...person,avatar:readingPortrait(project,person)})).filter(person => person.avatar&&person.identityState!=='pending');
   const [image, previousImage, portraits, covers] = await Promise.all([
     images.page(page),
     previous ? images.page(previous, 'reference') : Promise.resolve(null),

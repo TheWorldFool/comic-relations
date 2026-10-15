@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
 import { replaceFile } from './atomic-file.js';
+import { invalidateAppearanceUndo } from './appearance-undo.js';
 import path from 'node:path';
 import { z } from 'zod';
 import type { Project } from '../shared/types.js';
@@ -19,6 +20,7 @@ export async function readProject(id: string): Promise<Project> {
   catch{throw new Error('项目文件无法读取或已损坏。可从书架恢复最近备份，当前文件会保留。');}
 }
 export async function saveProject(project: Project) {
+  invalidateAppearanceUndo(project);
   const dir=projectDir(project.id);await mkdir(dir,{recursive:true});
   const current=path.join(dir,'project.json');
   let previous:string|undefined;
@@ -40,6 +42,7 @@ export async function restoreProject(id:string){
   const current=await readFile(path.join(dir,'project.json'),'utf8').catch(error=>{if((error as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw error;});
   if(current!==undefined)await writeFile(path.join(dir,`project.before-restore-${Date.now()}.json`),current,{flag:'wx'});
   if(restored.status==='running')restored.status=restored.processed>=restored.pages.length?'completed':'paused';
+  if(restored.appearanceUndo)restored.appearanceUndo.available=false;
   restored.updatedAt=new Date().toISOString();
   await atomicWrite(path.join(dir,'project.json'),JSON.stringify(restored,null,2));
   return restored;

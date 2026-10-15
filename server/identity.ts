@@ -6,6 +6,7 @@ import { relationKey } from './analysis.js';
 import { mergeCorrections } from './corrections.js';
 import { factKey } from './character-facts.js';
 import { addReference, visibleCast, visibleRelations } from './identity-state.js';
+import { rebuildStageRecords } from './stage-records.js';
 
 export function canonicalId(project:Project,id:string){
   const seen=new Set<string>();
@@ -95,6 +96,8 @@ export function mergeCharacters(project:Project,source:string,target:string){
   const people=identityView(project).characters;
   if(source===target||![source,target].every(id=>people.some(c=>c.id===id)))throw new Error('请选择两个不同的现有人物。');
   const corrections=mergeCorrections(project,source,target);
+  project.storyReviewFromPage=Math.min(project.storyReviewFromPage??Infinity,people.find(c=>c.id===source)!.firstPage);
+  project.storyReviewThroughPage=Math.max(project.storyReviewThroughPage||0,project.processed);
   project.characters=people;project.pendingIdentities=[];
   const resolve=(id:string)=>id===source?target:id;
   const mergePeople=(people:Character[])=>{
@@ -137,6 +140,7 @@ export function mergeCharacters(project:Project,source:string,target:string){
   refreshAppearanceReferences(project);
   const current=project.stages.at(-1);
   if(current){current.characters=structuredClone(visibleCast(project));current.relations=structuredClone(visibleRelations(project));}
+  for(const stage of project.stages)rebuildStageRecords(project,stage);
   project.identityRedirects=Object.fromEntries([...Object.entries(project.identityRedirects||{}).map(([id,value])=>[id,resolve(value)]),[source,target]]);
   project.identitySuggestions=project.identitySuggestions?.map(s=>({...s,source:resolve(s.source),target:resolve(s.target)})).filter(s=>s.source!==s.target);
   separatePending(project);

@@ -1,3 +1,4 @@
+import { rebuildStageRecords } from './stage-records.js';
 import { refreshCastEvidence } from './cast-evidence.js';
 import { beginAppearanceLedger, rebuildAppearanceEvidence } from './appearances.js';
 import { identityPeople } from '../shared/identity-people.js';
@@ -31,6 +32,9 @@ function correctInto(project:Project,input:CorrectionInput){
     if(!known.has(input.relation.source)||!known.has(input.relation.target)||input.relation.source===input.relation.target)throw new Error('关系两端必须是不同的现有人物。');
   }else if(!known.has(input.personId)||(input.kind==='fact'&&input.fact.target&&(!known.has(input.fact.target)||input.fact.target===input.personId)))throw new Error('人物或状态目标无效。');
   if(input.kind==='fact'&&input.fact.sincePage>project.processed||input.kind==='relation'&&input.relation.sincePage>project.processed)throw new Error('证据页不能超过已读范围。');
+  const affectedPage=input.kind==='character'?identityPeople(project).find(c=>c.id===input.personId)!.firstPage:input.kind==='fact'?input.fact.sincePage:input.relation.sincePage;
+  project.storyReviewFromPage=Math.min(project.storyReviewFromPage??Infinity,affectedPage);
+  project.storyReviewThroughPage=Math.max(project.storyReviewThroughPage||0,project.processed);
   if(input.scope==='once'){
     if(project.corrections?.some(c=>correctionKey(c)===correctionKey(input)))throw new Error('此项已有持续固定，请先解除固定，再进行本次校正。');
     beginAppearanceLedger(project);
@@ -43,16 +47,18 @@ function correctInto(project:Project,input:CorrectionInput){
       const {source,target,sincePage,...relation}=input.relation;
       project.appearanceRelations!.push({...meta,...relation,evidencePage:sincePage,source:{characterId:source},target:{characterId:target},action:input.action});
     }else applyCorrectionValue(project,input);
+    if(input.kind==='character')project.manualCharacterEdits=[...(project.manualCharacterEdits||[]).filter(c=>c.kind!=='character'||c.personId!==input.personId),{...structuredClone(input),id:randomUUID(),page:project.processed}];
     rebuildAppearanceEvidence(project);
     project.canUndoMerge=false;
     return;
   }
   const c:ManualCorrection={...structuredClone(input),id:randomUUID(),page:project.processed};
+  if(c.kind==='character')project.manualCharacterEdits=project.manualCharacterEdits?.filter(old=>old.kind!=='character'||old.personId!==c.personId);
   project.corrections=[...(project.corrections||[]).filter(old=>correctionKey(old)!==correctionKey(c)),c];
   applyCorrectionValue(project,c);
   refreshCastEvidence(project);
   const stage=project.stages.at(-1);
-  if(stage){stage.characters=structuredClone(visibleCast(project));stage.relations=structuredClone(visibleRelations(project));}
+  if(stage){stage.characters=structuredClone(visibleCast(project));stage.relations=structuredClone(visibleRelations(project));rebuildStageRecords(project,stage);}
   project.canUndoMerge=false;
 }
 
